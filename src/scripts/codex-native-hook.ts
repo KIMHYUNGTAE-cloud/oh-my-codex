@@ -21958,6 +21958,7 @@ export async function dispatchCodexNativeHook(
   let resolvedNativeSessionId = nativeSessionId;
   let skipCanonicalSessionStartContext = false;
   let isSubagentSessionStart = false;
+  let recordedNativeSubagentSessionStart = false;
   const authoritativeTeamWorker = authoritativeTeamWorkerEvidence !== null;
   const authoritativeWorkerPayloadSessionId = authoritativeTeamWorker
     && candidateWorkerPayloadSessionId
@@ -22000,6 +22001,7 @@ export async function dispatchCodexNativeHook(
         );
         if (belongsToCanonicalSession) {
           resolvedNativeSessionId = nativeSessionId;
+          recordedNativeSubagentSessionStart = true;
           await recordNativeSubagentSessionStart(
             cwd,
             canonicalSessionId,
@@ -22593,7 +22595,8 @@ export async function dispatchCodexNativeHook(
           triageAdditionalContext,
         ].filter((entry): entry is string => Boolean(entry)).join("\n\n") || null;
     // Record bounded delivery evidence for native subagent SessionStart events
-    if (hookEventName === "SessionStart" && isSubagentSessionStart && allowImplicitSessionSideEffects) {
+    // Skip if recordNativeSubagentSessionStart already recorded the turn (to avoid duplicate increment)
+    if (hookEventName === "SessionStart" && isSubagentSessionStart && allowImplicitSessionSideEffects && !recordedNativeSubagentSessionStart) {
       const threadId = readPayloadThreadId(payload);
       if (canonicalSessionId?.trim() && threadId?.trim()) {
         await recordSubagentTurnForSession(cwd, {
