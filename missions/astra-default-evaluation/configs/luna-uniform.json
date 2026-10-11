@@ -1,0 +1,15 @@
+{
+  "id": "luna-uniform",
+  "label": "Uniform gpt-5.6-luna for all roles, effort medium",
+  "isBaseline": false,
+  "omxRevision": "8f7c1f207df1408e28dfd8ad7f62e7e4a95eab2b",
+  "roles": {
+    "explore": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" },
+    "executor": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" },
+    "code-reviewer": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" },
+    "team-worker": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" },
+    "sparkshell": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" }
+  },
+  "serviceTier": "unknown",
+  "cacheConditions": "unknown (Codex-owned; record observed conditions per run)"
+}

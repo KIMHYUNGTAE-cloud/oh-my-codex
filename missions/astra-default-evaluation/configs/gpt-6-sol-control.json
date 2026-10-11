@@ -1,0 +1,15 @@
+{
+  "id": "gpt-6-sol-control",
+  "label": "GPT-6 Sol control model (previous generation, medium reasoning)",
+  "isBaseline": false,
+  "omxRevision": "8f7c1f207df1408e28dfd8ad7f62e7e4a95eab2b",
+  "roles": {
+    "explore": { "model": "gpt-6-sol", "reasoningEffort": "medium" },
+    "executor": { "model": "gpt-6-sol", "reasoningEffort": "medium" },
+    "code-reviewer": { "model": "gpt-6-sol", "reasoningEffort": "medium" },
+    "team-worker": { "model": "gpt-6-sol", "reasoningEffort": "medium" },
+    "sparkshell": { "model": "gpt-6-sol", "reasoningEffort": "medium" }
+  },
+  "serviceTier": "unknown",
+  "cacheConditions": "unknown (Codex-owned; record observed conditions per run)"
+}
