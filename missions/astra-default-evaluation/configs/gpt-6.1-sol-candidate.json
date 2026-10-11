@@ -1,0 +1,15 @@
+{
+  "id": "gpt-6.1-sol-candidate",
+  "label": "GPT-6.1 Sol candidate model (current generation, medium reasoning)",
+  "isBaseline": false,
+  "omxRevision": "9702fd824a81e602e79b00c4428fb548ea67e71e",
+  "roles": {
+    "explore": { "model": "gpt-6.1-sol", "reasoningEffort": "medium" },
+    "executor": { "model": "gpt-6.1-sol", "reasoningEffort": "medium" },
+    "code-reviewer": { "model": "gpt-6.1-sol", "reasoningEffort": "medium" },
+    "team-worker": { "model": "gpt-6.1-sol", "reasoningEffort": "medium" },
+    "sparkshell": { "model": "gpt-6.1-sol", "reasoningEffort": "medium" }
+  },
+  "serviceTier": "unknown",
+  "cacheConditions": "unknown (Codex-owned; record observed conditions per run)"
+}
