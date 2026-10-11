@@ -25,6 +25,7 @@ import {
   readSubagentSessionSummary,
   readSubagentTrackingState,
   recordNativeSubagentAuthorityObservation,
+  recordSubagentTurnForSession,
   repairPersistedRootIdentity,
   quarantinePersistedRootAuthority,
   revokeNativeSubagentAuthorities,
@@ -21464,6 +21465,17 @@ async function buildStopHookOutput(
     ?? await resolveInternalSessionIdForPayload(cwd, sessionId);
   const threadId = readPayloadThreadId(payload);
   const suppressParentWorkflowStop = shouldSuppressParentWorkflowStopForSideConversation(payload);
+  
+  // Record bounded completion evidence for native subagent Stop events
+  if (canonicalSessionId?.trim() && threadId?.trim()) {
+    await recordSubagentTurnForSession(cwd, {
+      sessionId: canonicalSessionId.trim(),
+      threadId: threadId.trim(),
+      completed: true,
+      completionSource: 'native_stop_event',
+      timestamp: new Date().toISOString(),
+    }).catch(() => {});
+  }
   if (options.sessionScopedOnly) {
     if (!canonicalSessionId || suppressParentWorkflowStop) return null;
     const execFollowupOutput = await buildExecFollowupStopOutput(cwd, canonicalSessionId);

@@ -1278,6 +1278,72 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 		}
 	});
 
+	it("records bounded completion evidence for native Stop events to subagent tracking (#3729)", async () => {
+		const cwd = await mkdtemp(
+			join(tmpdir(), "omx-native-hook-stop-completion-evidence-"),
+		);
+		try {
+			const stateDir = join(cwd, ".omx", "state");
+			const sessionId = "sess-stop-completion-evidence";
+			const threadId = "thread-stop-completion-evidence";
+			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			
+			// Initialize subagent tracking
+			await writeJson(join(stateDir, "subagent-tracking.json"), {
+				schemaVersion: 1,
+				sessions: {
+					[sessionId]: {
+						session_id: sessionId,
+						leader_thread_id: "leader-thread",
+						updated_at: new Date().toISOString(),
+						threads: {
+							[threadId]: {
+								thread_id: threadId,
+								kind: "subagent",
+								status: "available",
+								first_seen_at: new Date().toISOString(),
+								last_seen_at: new Date().toISOString(),
+							},
+						},
+					},
+				},
+			});
+			
+			// Send Stop event
+			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+				cwd,
+				input: JSON.stringify({
+					hook_event_name: "Stop",
+					cwd,
+					session_id: sessionId,
+					thread_id: threadId,
+					stop_hook_active: true,
+				}),
+				encoding: "utf-8",
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			
+			assert.equal(result.status, 0, result.stderr || result.stdout);
+			assert.equal(result.stderr, "");
+			
+			// Verify completion evidence was recorded
+			const tracking = JSON.parse(
+				await readFile(join(stateDir, "subagent-tracking.json"), "utf-8"),
+			) as {
+				sessions?: Record<
+					string,
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+				>;
+			};
+			
+			const thread = tracking.sessions?.[sessionId]?.threads?.[threadId];
+			assert.ok(thread?.completed_at, "completion evidence must record completed_at timestamp");
+			assert.equal(thread?.completion_source, "native_stop_event", "completion evidence must mark completionSource as native_stop_event");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("emits no-op JSON for oversized Stop stdin without parsing or creating inactive state", async () => {
 		const cwd = await mkdtemp(
 			join(tmpdir(), "omx-native-hook-cli-stop-oversized-"),
