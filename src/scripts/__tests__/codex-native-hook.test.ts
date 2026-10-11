@@ -1288,6 +1288,8 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			const threadId = "thread-stop-subagent";
 			const leaderThreadId = "leader-thread";
 			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			await writeSessionStart(cwd, sessionId, { nativeSessionId: leaderThreadId });
+			await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
 			
 			// Initialize subagent tracking with subagent thread
 			await writeJson(join(stateDir, "subagent-tracking.json"), {
@@ -1318,21 +1320,16 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			});
 			
 			// Send Stop event from subagent thread
-			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
-				cwd,
-				input: JSON.stringify({
+			const result = await dispatchCodexNativeHook(
+				{
 					hook_event_name: "Stop",
 					cwd,
 					session_id: sessionId,
 					thread_id: threadId,
 					stop_hook_active: true,
-				}),
-				encoding: "utf-8",
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			
-			assert.equal(result.status, 0, result.stderr || result.stdout);
-			assert.equal(result.stderr, "");
+				},
+				{ cwd },
+			);
 			
 			// Verify completion evidence was recorded
 			const tracking = JSON.parse(
@@ -1340,7 +1337,7 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			) as {
 				sessions?: Record<
 					string,
-					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string; turn_count?: number }> }
 				>;
 			};
 			
@@ -1362,6 +1359,8 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			const threadId = "thread-sessionstart-subagent";
 			const leaderThreadId = "leader-thread";
 			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			await writeSessionStart(cwd, sessionId, { nativeSessionId: leaderThreadId });
+			await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
 			
 			// Initialize subagent tracking
 			await writeJson(join(stateDir, "subagent-tracking.json"), {
@@ -1392,20 +1391,15 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			});
 			
 			// Send SessionStart event from subagent thread
-			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
-				cwd,
-				input: JSON.stringify({
+			const result = await dispatchCodexNativeHook(
+				{
 					hook_event_name: "SessionStart",
 					cwd,
 					session_id: sessionId,
 					thread_id: threadId,
-				}),
-				encoding: "utf-8",
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			
-			assert.equal(result.status, 0, result.stderr || result.stdout);
-			assert.equal(result.stderr, "");
+				},
+				{ cwd },
+			);
 			
 			// Verify delivery evidence was recorded (without completion_source)
 			const tracking = JSON.parse(
@@ -1413,11 +1407,14 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			) as {
 				sessions?: Record<
 					string,
-					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string; turn_count?: number }> }
 				>;
 			};
 			
 			const thread = tracking.sessions?.[sessionId]?.threads?.[threadId];
+			assert.ok(thread, "thread should exist in tracking");
+			// SessionStart should record the turn (turn_count should be incremented to 1)
+			assert.equal(thread?.turn_count, 1, "SessionStart must record the turn (turn_count should be 1)");
 			// SessionStart should NOT set completed_at
 			assert.ok(!thread?.completed_at, "SessionStart must not set completed_at timestamp");
 			// SessionStart should NOT set completion_source
@@ -1436,6 +1433,8 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			const sessionId = "sess-stop-leader";
 			const leaderThreadId = "leader-thread-stop";
 			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			await writeSessionStart(cwd, sessionId, { nativeSessionId: leaderThreadId });
+			await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
 			
 			// Initialize subagent tracking with only leader thread
 			await writeJson(join(stateDir, "subagent-tracking.json"), {
@@ -1459,21 +1458,16 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			});
 			
 			// Send Stop event from leader thread
-			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
-				cwd,
-				input: JSON.stringify({
+			const result = await dispatchCodexNativeHook(
+				{
 					hook_event_name: "Stop",
 					cwd,
 					session_id: sessionId,
 					thread_id: leaderThreadId,
 					stop_hook_active: true,
-				}),
-				encoding: "utf-8",
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			
-			assert.equal(result.status, 0, result.stderr || result.stdout);
-			assert.equal(result.stderr, "");
+				},
+				{ cwd },
+			);
 			
 			// Verify NO completion evidence was recorded for leader
 			const tracking = JSON.parse(
@@ -1481,7 +1475,7 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			) as {
 				sessions?: Record<
 					string,
-					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string; turn_count?: number }> }
 				>;
 			};
 			
