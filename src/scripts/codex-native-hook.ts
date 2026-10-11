@@ -21465,17 +21465,6 @@ async function buildStopHookOutput(
     ?? await resolveInternalSessionIdForPayload(cwd, sessionId);
   const threadId = readPayloadThreadId(payload);
   const suppressParentWorkflowStop = shouldSuppressParentWorkflowStopForSideConversation(payload);
-  
-  // Record bounded completion evidence for native subagent Stop events
-  if (canonicalSessionId?.trim() && threadId?.trim()) {
-    await recordSubagentTurnForSession(cwd, {
-      sessionId: canonicalSessionId.trim(),
-      threadId: threadId.trim(),
-      completed: true,
-      completionSource: 'native_stop_event',
-      timestamp: new Date().toISOString(),
-    }).catch(() => {});
-  }
   if (options.sessionScopedOnly) {
     if (!canonicalSessionId || suppressParentWorkflowStop) return null;
     const execFollowupOutput = await buildExecFollowupStopOutput(cwd, canonicalSessionId);
@@ -22603,6 +22592,18 @@ export async function dispatchCodexNativeHook(
           goalWorkflowAdditionalContext,
           triageAdditionalContext,
         ].filter((entry): entry is string => Boolean(entry)).join("\n\n") || null;
+    // Record bounded delivery evidence for native subagent SessionStart events
+    if (hookEventName === "SessionStart" && isSubagentSessionStart && allowImplicitSessionSideEffects) {
+      const threadId = readPayloadThreadId(payload);
+      if (canonicalSessionId?.trim() && threadId?.trim()) {
+        await recordSubagentTurnForSession(cwd, {
+          sessionId: canonicalSessionId.trim(),
+          threadId: threadId.trim(),
+          completed: false,
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
+      }
+    }
     if (additionalContext) {
       outputJson = {
         hookSpecificOutput: {
@@ -22677,6 +22678,19 @@ export async function dispatchCodexNativeHook(
         skipAutoNudge: isSubagentStop,
         sessionScopedOnly: !allowGlobalSideEffects,
       });
+      // Record bounded completion evidence for native subagent Stop events
+      if (isSubagentStop) {
+        const threadId = readPayloadThreadId(payload);
+        if (canonicalSessionId?.trim() && threadId?.trim()) {
+          await recordSubagentTurnForSession(cwd, {
+            sessionId: canonicalSessionId.trim(),
+            threadId: threadId.trim(),
+            completed: true,
+            completionSource: 'native_stop_event',
+            timestamp: new Date().toISOString(),
+          }).catch(() => {});
+        }
+      }
       outputJson = stopOutput ?? (
         allowGlobalSideEffects
           ? await buildCompletedGoalCleanupStopOutput(payload, cwd)

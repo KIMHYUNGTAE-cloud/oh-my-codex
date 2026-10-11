@@ -1278,25 +1278,33 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 		}
 	});
 
-	it("records bounded completion evidence for native Stop events to subagent tracking (#3729)", async () => {
+	it("records bounded completion evidence for native subagent Stop events (#3729)", async () => {
 		const cwd = await mkdtemp(
 			join(tmpdir(), "omx-native-hook-stop-completion-evidence-"),
 		);
 		try {
 			const stateDir = join(cwd, ".omx", "state");
-			const sessionId = "sess-stop-completion-evidence";
-			const threadId = "thread-stop-completion-evidence";
+			const sessionId = "sess-stop-subagent";
+			const threadId = "thread-stop-subagent";
+			const leaderThreadId = "leader-thread";
 			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
 			
-			// Initialize subagent tracking
+			// Initialize subagent tracking with subagent thread
 			await writeJson(join(stateDir, "subagent-tracking.json"), {
 				schemaVersion: 1,
 				sessions: {
 					[sessionId]: {
 						session_id: sessionId,
-						leader_thread_id: "leader-thread",
+						leader_thread_id: leaderThreadId,
 						updated_at: new Date().toISOString(),
 						threads: {
+							[leaderThreadId]: {
+								thread_id: leaderThreadId,
+								kind: "leader",
+								status: "available",
+								first_seen_at: new Date().toISOString(),
+								last_seen_at: new Date().toISOString(),
+							},
 							[threadId]: {
 								thread_id: threadId,
 								kind: "subagent",
@@ -1309,7 +1317,7 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 				},
 			});
 			
-			// Send Stop event
+			// Send Stop event from subagent thread
 			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
 				cwd,
 				input: JSON.stringify({
@@ -1339,6 +1347,147 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 			const thread = tracking.sessions?.[sessionId]?.threads?.[threadId];
 			assert.ok(thread?.completed_at, "completion evidence must record completed_at timestamp");
 			assert.equal(thread?.completion_source, "native_stop_event", "completion evidence must mark completionSource as native_stop_event");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("records bounded delivery evidence for native subagent SessionStart events (#3729)", async () => {
+		const cwd = await mkdtemp(
+			join(tmpdir(), "omx-native-hook-sessionstart-delivery-evidence-"),
+		);
+		try {
+			const stateDir = join(cwd, ".omx", "state");
+			const sessionId = "sess-sessionstart-subagent";
+			const threadId = "thread-sessionstart-subagent";
+			const leaderThreadId = "leader-thread";
+			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			
+			// Initialize subagent tracking
+			await writeJson(join(stateDir, "subagent-tracking.json"), {
+				schemaVersion: 1,
+				sessions: {
+					[sessionId]: {
+						session_id: sessionId,
+						leader_thread_id: leaderThreadId,
+						updated_at: new Date().toISOString(),
+						threads: {
+							[leaderThreadId]: {
+								thread_id: leaderThreadId,
+								kind: "leader",
+								status: "available",
+								first_seen_at: new Date().toISOString(),
+								last_seen_at: new Date().toISOString(),
+							},
+							[threadId]: {
+								thread_id: threadId,
+								kind: "subagent",
+								status: "available",
+								first_seen_at: new Date().toISOString(),
+								last_seen_at: new Date().toISOString(),
+							},
+						},
+					},
+				},
+			});
+			
+			// Send SessionStart event from subagent thread
+			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+				cwd,
+				input: JSON.stringify({
+					hook_event_name: "SessionStart",
+					cwd,
+					session_id: sessionId,
+					thread_id: threadId,
+				}),
+				encoding: "utf-8",
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			
+			assert.equal(result.status, 0, result.stderr || result.stdout);
+			assert.equal(result.stderr, "");
+			
+			// Verify delivery evidence was recorded (without completion_source)
+			const tracking = JSON.parse(
+				await readFile(join(stateDir, "subagent-tracking.json"), "utf-8"),
+			) as {
+				sessions?: Record<
+					string,
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+				>;
+			};
+			
+			const thread = tracking.sessions?.[sessionId]?.threads?.[threadId];
+			// SessionStart should NOT set completed_at
+			assert.ok(!thread?.completed_at, "SessionStart must not set completed_at timestamp");
+			// SessionStart should NOT set completion_source
+			assert.ok(!thread?.completion_source, "SessionStart must not set completion_source");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("does NOT record completion evidence for leader Stop events (#3729)", async () => {
+		const cwd = await mkdtemp(
+			join(tmpdir(), "omx-native-hook-stop-leader-no-record-"),
+		);
+		try {
+			const stateDir = join(cwd, ".omx", "state");
+			const sessionId = "sess-stop-leader";
+			const leaderThreadId = "leader-thread-stop";
+			await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+			
+			// Initialize subagent tracking with only leader thread
+			await writeJson(join(stateDir, "subagent-tracking.json"), {
+				schemaVersion: 1,
+				sessions: {
+					[sessionId]: {
+						session_id: sessionId,
+						leader_thread_id: leaderThreadId,
+						updated_at: new Date().toISOString(),
+						threads: {
+							[leaderThreadId]: {
+								thread_id: leaderThreadId,
+								kind: "leader",
+								status: "available",
+								first_seen_at: new Date().toISOString(),
+								last_seen_at: new Date().toISOString(),
+							},
+						},
+					},
+				},
+			});
+			
+			// Send Stop event from leader thread
+			const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+				cwd,
+				input: JSON.stringify({
+					hook_event_name: "Stop",
+					cwd,
+					session_id: sessionId,
+					thread_id: leaderThreadId,
+					stop_hook_active: true,
+				}),
+				encoding: "utf-8",
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			
+			assert.equal(result.status, 0, result.stderr || result.stdout);
+			assert.equal(result.stderr, "");
+			
+			// Verify NO completion evidence was recorded for leader
+			const tracking = JSON.parse(
+				await readFile(join(stateDir, "subagent-tracking.json"), "utf-8"),
+			) as {
+				sessions?: Record<
+					string,
+					{ threads?: Record<string, { completed_at?: string; completion_source?: string }> }
+				>;
+			};
+			
+			const thread = tracking.sessions?.[sessionId]?.threads?.[leaderThreadId];
+			assert.ok(!thread?.completed_at, "leader Stop must not record completed_at timestamp");
+			assert.ok(!thread?.completion_source, "leader Stop must not record completion_source");
 		} finally {
 			await rm(cwd, { recursive: true, force: true });
 		}
