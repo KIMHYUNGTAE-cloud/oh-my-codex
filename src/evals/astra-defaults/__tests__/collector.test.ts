@@ -140,7 +140,7 @@ test('collector: handle null usage data gracefully', async () => {
 
 test('collector: records latency on success', async () => {
   const mockCodexInvoker = async (): Promise<CodexOutput> => {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     return {
       exitCode: 0,
       stdout: JSON.stringify({
@@ -152,12 +152,12 @@ test('collector: records latency on success', async () => {
 
   const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker });
 
-  assert.ok((result.record.latencyMs ?? 0) >= 10);
+  assert.ok((result.record.latencyMs ?? 0) >= 50);
 });
 
 test('collector: records latency even on error', async () => {
   const mockCodexInvoker = async (): Promise<CodexOutput> => {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     return {
       exitCode: 1,
       stdout: '',
@@ -167,5 +167,5 @@ test('collector: records latency even on error', async () => {
 
   const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker });
 
-  assert.ok((result.record.latencyMs ?? 0) >= 10);
+  assert.ok((result.record.latencyMs ?? 0) >= 50);
 });

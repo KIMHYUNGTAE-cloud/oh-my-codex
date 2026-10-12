@@ -32,7 +32,7 @@ function invalid(row: RunRecord, pattern: RegExp): void {
 describe('stage configuration and supplied-record validation', () => {
   it('loads old configurations unchanged and leaves new observations unknown', () => {
     const legacy = loadSuite(mission);
-    assert.equal(legacy.configs.length, 3);
+    assert.equal(legacy.configs.length, 6);
     assert.ok(legacy.configs.every((config) => config.stages === undefined));
     const fixture = legacy.fixtures.find((entry) => entry.deterministicBaseline)!;
     const old = { ...baselineRecord(fixture), usage: { inputTokens: 0, outputTokens: 0 } };
@@ -221,7 +221,7 @@ describe('model-free report entrypoint', () => {
   it('preserves the default evaluator JSON contract', () => {
     const result = spawnSync(process.execPath, [script], { encoding: 'utf-8' });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), { pass: true, score: 1, fixtures: 6, configs: 3, deterministicBaselines: 2 });
+    assert.deepEqual(JSON.parse(result.stdout), { pass: true, score: 1, fixtures: 6, configs: 6, deterministicBaselines: 2 });
   });
 
   it('reproduces supplied records plus existing deterministic baselines byte for byte', () => {
