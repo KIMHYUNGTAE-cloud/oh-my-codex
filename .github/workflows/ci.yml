@@ -1018,7 +1018,7 @@ jobs:
           MAX_TRIES=60
           SLEEP_INTERVAL=15
           for i in $(seq 1 $MAX_TRIES); do
-            VIEW_OUTPUT=$(npm view "oh-my-codex@$VERSION" version 2>&1 || true)
+            VIEW_OUTPUT=$(npm view "oh-my-codex@$VERSION" version 2>/dev/null || true)
             if [ "$VIEW_OUTPUT" = "$VERSION" ]; then
               npm view oh-my-codex version dist-tags --json
               echo "::notice::oh-my-codex@$VERSION published and visible on npm registry after ~$((i * SLEEP_INTERVAL))s"
@@ -1028,7 +1028,8 @@ jobs:
             # On final try, do more detailed diagnosis
             if [ "$i" -eq "$MAX_TRIES" ]; then
               echo "::error::npm did not expose oh-my-codex@$VERSION within ~15 minutes" >&2
-              echo "Last npm view output: $VIEW_OUTPUT" >&2
+              VIEW_FULL=$(npm view "oh-my-codex@$VERSION" 2>&1 || true)
+              echo "Last npm view output: $VIEW_FULL" >&2
               exit 1
             fi
             
