@@ -165,13 +165,15 @@ export async function collectRecord(
     }
 
     // Parse JSONL output (--json outputs one JSON object per line)
-    // The final event should contain the agent's final response
-    let finalEvent: Record<string, unknown> | null = null;
+    // We need to find:
+    // 1. responseText from the last item.completed event where item.type === 'agent_message' (field: item.text)
+    // 2. usage from turn.completed events (sum across all)
+    let events: Record<string, unknown>[] = [];
     try {
       const lines = output.stdout.trim().split('\n');
       for (const line of lines) {
         if (line.trim()) {
-          finalEvent = JSON.parse(line);
+          events.push(JSON.parse(line));
         }
       }
     } catch (e) {
@@ -192,7 +194,7 @@ export async function collectRecord(
       };
     }
 
-    if (!finalEvent) {
+    if (events.length === 0) {
       return {
         record: {
           fixtureId: fixture.id,
@@ -210,10 +212,45 @@ export async function collectRecord(
       };
     }
 
-    // Extract response text and usage from final event
-    // The structure depends on what Codex outputs
-    const responseText = String(finalEvent.response ?? finalEvent.message ?? '');
-    const usageData = finalEvent.usage as Record<string, number> | undefined;
+    // Extract response text from last item.completed event with item.type === 'agent_message'
+    let responseText = '';
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type === 'item.completed') {
+        const item = event.item as Record<string, unknown> | undefined;
+        if (item?.type === 'agent_message') {
+          responseText = String(item.text ?? '');
+          break;
+        }
+      }
+    }
+
+    // Sum usage across all turn.completed events
+    let usageData: Record<string, number> | undefined;
+    for (const event of events) {
+      if (event.type === 'turn.completed') {
+        const usage = event.usage as Record<string, number> | undefined;
+        if (usage) {
+          if (!usageData) usageData = {};
+          // Sum the usage fields
+          if (usage.input_tokens !== undefined) {
+            usageData.input_tokens = (usageData.input_tokens ?? 0) + usage.input_tokens;
+          }
+          if (usage.output_tokens !== undefined) {
+            usageData.output_tokens = (usageData.output_tokens ?? 0) + usage.output_tokens;
+          }
+          if (usage.uncached_input_tokens !== undefined) {
+            usageData.uncached_input_tokens = (usageData.uncached_input_tokens ?? 0) + usage.uncached_input_tokens;
+          }
+          if (usage.cache_read_tokens !== undefined) {
+            usageData.cache_read_tokens = (usageData.cache_read_tokens ?? 0) + usage.cache_read_tokens;
+          }
+          if (usage.cache_write_tokens !== undefined) {
+            usageData.cache_write_tokens = (usageData.cache_write_tokens ?? 0) + usage.cache_write_tokens;
+          }
+        }
+      }
+    }
 
     // Grade response
     const checks = scoreResponse(fixture, responseText);

@@ -35,14 +35,24 @@ const config: EvalConfig = {
 };
 
 test('collector: pass when response matches checks', async () => {
-  const mockCodexInvoker = async (): Promise<CodexOutput> => ({
-    exitCode: 0,
-    stdout: JSON.stringify({
-      response: 'Found a bug in the code. The variable is used correctly.',
-      usage: { input_tokens: 100, output_tokens: 50 },
-    }),
-    stderr: '',
-  });
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item-1', type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+      }),
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-1',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    ].join('\n');
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
 
   const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
 
@@ -61,14 +71,24 @@ test('collector: pass when response matches checks', async () => {
 });
 
 test('collector: fail when response does not match checks', async () => {
-  const mockCodexInvoker = async (): Promise<CodexOutput> => ({
-    exitCode: 0,
-    stdout: JSON.stringify({
-      response: 'Maybe this is a bug. Perhaps you should check.',
-      usage: { input_tokens: 100, output_tokens: 50 },
-    }),
-    stderr: '',
-  });
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item-1', type: 'agent_message', text: 'Maybe this is a bug. Perhaps you should check.' },
+      }),
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-1',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    ].join('\n');
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
 
   const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
 
@@ -126,11 +146,17 @@ test('collector: error when missing role config', async () => {
 });
 
 test('collector: handle null usage data gracefully', async () => {
-  const mockCodexInvoker = async (): Promise<CodexOutput> => ({
-    exitCode: 0,
-    stdout: JSON.stringify({ response: 'Found a bug in the code. The variable is used correctly.' }),
-    stderr: '',
-  });
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    const jsonl = JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item-1', type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+    });
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
 
   const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
 
@@ -141,11 +167,13 @@ test('collector: handle null usage data gracefully', async () => {
 test('collector: records latency on success', async () => {
   const mockCodexInvoker = async (): Promise<CodexOutput> => {
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const jsonl = JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item-1', type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+    });
     return {
       exitCode: 0,
-      stdout: JSON.stringify({
-        response: 'Found a bug in the code. The variable is used correctly.',
-      }),
+      stdout: jsonl,
       stderr: '',
     };
   };
@@ -175,9 +203,13 @@ test('collector: embeds fixture inputs into prompt', async () => {
   const mockCodexInvoker = async (args: string[]): Promise<CodexOutput> => {
     // The prompt is the last argument
     capturedPrompt = args[args.length - 1] ?? '';
+    const jsonl = JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item-1', type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+    });
     return {
       exitCode: 0,
-      stdout: JSON.stringify({ response: 'Found a bug in the code. The variable is used correctly.' }),
+      stdout: jsonl,
       stderr: '',
     };
   };
@@ -194,4 +226,117 @@ test('collector: embeds fixture inputs into prompt', async () => {
   assert.ok(capturedPrompt.includes('commandOutput'));
   assert.ok(capturedPrompt.includes('test output line 1'));
   assert.strictEqual(result.record.outcome, 'pass');
+});
+
+test('collector: handles multi-event JSONL output (real codex exec --json format)', async () => {
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    // Realistic multi-event JSONL output from codex exec --json
+    // Events include item.completed with agent_message, and turn.completed with usage
+    const jsonl = [
+      JSON.stringify({
+        type: 'item.started',
+        item: { id: 'item-1', type: 'agent_message' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item-1', type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+      }),
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-1',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    ].join('\n');
+
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
+
+  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
+
+  assert.strictEqual(result.record.outcome, 'pass');
+  assert.strictEqual(result.record.checks.length, 2);
+  assert.ok(result.record.checks.every((c) => c.passed));
+  assert.deepStrictEqual(result.record.usage, {
+    inputTokens: 100,
+    outputTokens: 50,
+    uncachedInputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    source: 'codex exec --json',
+  });
+});
+
+test('collector: handles multi-turn JSONL with usage summing', async () => {
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    // Multiple turns with usage that should be summed
+    const jsonl = [
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item-1', type: 'agent_message', text: 'First response.' },
+      }),
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-1',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item-2', type: 'agent_message', text: 'Final response: Found a bug in the code. The variable is used correctly.' },
+      }),
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-2',
+        usage: { input_tokens: 50, output_tokens: 30 },
+      }),
+    ].join('\n');
+
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
+
+  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
+
+  assert.strictEqual(result.record.outcome, 'pass');
+  // responseText should be from the LAST item.completed event with agent_message
+  // Usage should be summed across turns
+  assert.deepStrictEqual(result.record.usage, {
+    inputTokens: 150, // 100 + 50
+    outputTokens: 80, // 50 + 30
+    uncachedInputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    source: 'codex exec --json',
+  });
+});
+
+test('collector: handles empty response text gracefully', async () => {
+  const mockCodexInvoker = async (): Promise<CodexOutput> => {
+    // Output with no agent_message event
+    const jsonl = [
+      JSON.stringify({
+        type: 'turn.completed',
+        turn_id: 'turn-1',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    ].join('\n');
+
+    return {
+      exitCode: 0,
+      stdout: jsonl,
+      stderr: '',
+    };
+  };
+
+  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
+
+  // Should fail because no agent_message response text
+  assert.strictEqual(result.record.outcome, 'fail');
+  assert.ok(result.record.checks.some((c) => !c.passed));
 });
