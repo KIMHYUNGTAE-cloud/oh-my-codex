@@ -346,6 +346,10 @@ export function generateStandaloneAgentToml(
 
 /**
  * Generate TOML content for a prompt-backed OMX role agent.
+ * Includes model field for all agents for documentation and discoverability.
+ * Only includes modelProvider field if there's an explicit per-agent override,
+ * not when it merely mirrors the config default. This prevents agent TOMLs from
+ * becoming stale when config.toml provider changes (fixes #3779).
  */
 export function generateAgentToml(
   agent: AgentDefinition,
@@ -353,9 +357,13 @@ export function generateAgentToml(
   options: AgentModelResolutionOptions = {},
 ): string {
   const resolvedModel = resolveAgentModel(agent, options);
+  const reasoningOverride = getAgentReasoningOverride(agent.name, options.codexHomeOverride);
+  const hasAgentModelOverride = !!getAgentModelOverride(agent.name, options.codexHomeOverride);
+  
   const resolvedModelProvider = shouldInheritRootModelProvider(agent, resolvedModel, options)
     ? getCodexConfigRootModelProvider(options.codexHomeOverride)
     : undefined;
+  
   return generateStandaloneAgentToml({
     name: agent.name,
     description: agent.description,
@@ -365,10 +373,12 @@ export function generateAgentToml(
       resolvedModel,
       { nativeAgent: true },
     ),
+    // Always include model field for documentation
     model: resolvedModel,
-    modelProvider: resolvedModelProvider,
-    reasoningEffort: getAgentReasoningOverride(agent.name, options.codexHomeOverride)
-      ?? agent.reasoningEffort,
+    // Only include modelProvider field if agent has explicit per-agent override,
+    // not when it mirrors config defaults (prevents staleness after provider changes)
+    modelProvider: hasAgentModelOverride && resolvedModelProvider ? resolvedModelProvider : undefined,
+    reasoningEffort: reasoningOverride ?? agent.reasoningEffort,
   });
 }
 

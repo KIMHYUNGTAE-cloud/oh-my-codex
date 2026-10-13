@@ -166,7 +166,9 @@ describe("agents/native-config", () => {
     const toml = generateAgentToml(agent, prompt);
 
     assert.match(toml, /# oh-my-codex agent: executor/);
-    assert.match(toml, /model = "gpt-6-astra"/);
+    // After fix for #3779: model field not written for agents without explicit overrides
+    // The model is resolved from config defaults and documented in resolved_model metadata
+    assert.doesNotMatch(toml, /^model = /);
     assert.match(toml, /model_reasoning_effort = "medium"/);
     assert.ok(!toml.includes("title: demo"));
     assert.ok(toml.includes("Instruction line"));
@@ -542,7 +544,9 @@ describe("agents/native-config", () => {
       });
       const executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
       assert.match(executorToml, /model = "gpt-5\.6-sol"/);
-      assert.match(executorToml, /model_provider = "cheapRouter"/);
+      // After #3779 fix: model_provider is NOT written to agent TOML when it's just inherited from config
+      // Agents inherit it from config.toml at runtime, preventing staleness when provider changes
+      assert.doesNotMatch(executorToml, /model_provider = "cheapRouter"/, "model_provider should not be baked in when inherited from config");
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
@@ -673,6 +677,55 @@ describe("agents/native-config", () => {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
       process.env.OMX_DEFAULT_STANDARD_MODEL = "gpt-5.6-terra";
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("agent TOMLs do not include model_provider fields that merely mirror config defaults (reproduces #3779)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omx-issue-3779-stale-provider-"));
+    const codexHome = join(root, ".codex");
+    const promptsDir = join(root, "prompts");
+    const outDir = join(codexHome, "agents");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousStandardModel = process.env.OMX_DEFAULT_STANDARD_MODEL;
+
+    try {
+      process.env.CODEX_HOME = codexHome;
+      delete process.env.OMX_DEFAULT_STANDARD_MODEL; // Isolate test from env defaults
+      await mkdir(promptsDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+
+      // Step 1: Setup with provider A
+      await writeFile(
+        join(codexHome, "config.toml"),
+        'model = "gpt-5.6-terra"\nmodel_provider = "provider-a"\n',
+      );
+      await writeFile(join(promptsDir, "executor.md"), "executor prompt");
+
+      await installNativeAgentConfigs(root, {
+        agentsDir: outDir,
+        catalogManifest: manifestWithAgents(["executor"]),
+      });
+
+      let executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
+      // After the fix, model_provider should NOT be written for default inheritance
+      assert.doesNotMatch(executorToml, /model_provider\s*=/, "model_provider should not be written for default inheritance");
+
+      // Step 2: Change config to provider B without --force
+      await writeFile(
+        join(codexHome, "config.toml"),
+        'model = "gpt-6-astra"\nmodel_provider = "provider-b"\n',
+      );
+
+      // Step 3: Check that the agent TOML is NOT stale
+      // Since model_provider was never written (no per-agent override), it won't be stale
+      executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
+      assert.doesNotMatch(executorToml, /model_provider\s*=/, "model_provider should still not be present - not stale because never written");
+    } finally {
+      if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
+      else delete process.env.CODEX_HOME;
+      if (typeof previousStandardModel === "string") process.env.OMX_DEFAULT_STANDARD_MODEL = previousStandardModel;
+      else delete process.env.OMX_DEFAULT_STANDARD_MODEL;
       await rm(root, { recursive: true, force: true });
     }
   });
