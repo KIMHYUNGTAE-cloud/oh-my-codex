@@ -11,7 +11,6 @@ import { readCatalogManifest } from "../catalog/reader.js";
 import type { CatalogManifest } from "../catalog/schema.js";
 import { getInstallableNativeAgentNames } from "./policy.js";
 import {
-  getCodexConfigRootModelProvider,
   getEnvConfiguredStandardDefaultModel,
   getAgentReasoningOverride,
   getAgentModelOverride,
@@ -201,16 +200,6 @@ function resolveAgentModel(
   }
 }
 
-function shouldInheritRootModelProvider(
-  agent: AgentDefinition,
-  resolvedModel: string,
-  options: AgentModelResolutionOptions = {},
-): boolean {
-  if (agent.modelClass !== "fast") return true;
-  if (getAgentModelOverride(agent.name, options.codexHomeOverride)) return true;
-  return resolvedModel !== getSparkDefaultModel(options.codexHomeOverride);
-}
-
 export function composeRoleInstructions(
   promptContent: string,
   metadata: RoleInstructionMetadata | null,
@@ -359,10 +348,7 @@ export function generateAgentToml(
   const resolvedModel = resolveAgentModel(agent, options);
   const reasoningOverride = getAgentReasoningOverride(agent.name, options.codexHomeOverride);
   const hasAgentModelOverride = !!getAgentModelOverride(agent.name, options.codexHomeOverride);
-  
-  const resolvedModelProvider = shouldInheritRootModelProvider(agent, resolvedModel, options)
-    ? getCodexConfigRootModelProvider(options.codexHomeOverride)
-    : undefined;
+  const hasExactModel = !!agent.exactModel;
   
   return generateStandaloneAgentToml({
     name: agent.name,
@@ -373,11 +359,17 @@ export function generateAgentToml(
       resolvedModel,
       { nativeAgent: true },
     ),
-    // Always include model field for documentation
-    model: resolvedModel,
-    // Only include modelProvider field if agent has explicit per-agent override,
-    // not when it mirrors config defaults (prevents staleness after provider changes)
-    modelProvider: hasAgentModelOverride && resolvedModelProvider ? resolvedModelProvider : undefined,
+    // Only include model field if agent has an explicit specification: either exactModel from
+    // agent definition or per-agent override from agentModels. For agents without explicit
+    // specifications, model is inherited from config.toml at runtime, preventing staleness
+    // when config changes. The resolved model is still documented in resolved_model metadata.
+    model: (hasExactModel || hasAgentModelOverride) ? resolvedModel : undefined,
+    // Never include modelProvider field in agent TOMLs to prevent staleness.
+    // Agents inherit model_provider from config.toml at runtime, so baking it in
+    // causes staleness when config changes. This separation of concerns ensures
+    // that updating the provider in config.toml immediately affects all agents
+    // without requiring re-installation.
+    modelProvider: undefined,
     reasoningEffort: reasoningOverride ?? agent.reasoningEffort,
   });
 }

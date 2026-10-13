@@ -168,7 +168,7 @@ describe("agents/native-config", () => {
     assert.match(toml, /# oh-my-codex agent: executor/);
     // After fix for #3779: model field not written for agents without explicit overrides
     // The model is resolved from config defaults and documented in resolved_model metadata
-    assert.doesNotMatch(toml, /^model = /);
+    assert.doesNotMatch(toml, /^model = /m);
     assert.match(toml, /model_reasoning_effort = "medium"/);
     assert.ok(!toml.includes("title: demo"));
     assert.ok(toml.includes("Instruction line"));
@@ -327,8 +327,9 @@ describe("agents/native-config", () => {
       "debugger",
     ] as const) {
       const toml = generateAgentToml(AGENT_DEFINITIONS[role], `${role} prompt`);
-      assert.match(toml, /model = "gpt-5\.6-sol"/, `${role} should stay on configured/root gpt-5.6-sol`);
-      assert.doesNotMatch(toml, /model = "gpt-5\.6-terra"/, `${role} must not inherit exact-Terra pins`);
+      // Without exactModel, model field not written; inherited from defaults at runtime
+      assert.doesNotMatch(toml, /^model = /m, `${role} resolves to configured model but inherits at runtime`);
+      assert.match(toml, /resolved_model: gpt-5\.6-sol/, `${role} should resolve to configured/default gpt-5.6-sol`);
     }
   });
 
@@ -472,7 +473,9 @@ describe("agents/native-config", () => {
         join(outDir, "executor.toml"),
         "utf8",
       );
-      assert.match(executorToml, /model = "gpt-6-astra"/);
+      // With no config or per-agent override, model field is not written; inherited at runtime
+      assert.doesNotMatch(executorToml, /^model = /m, "model should not be baked in without explicit override");
+      assert.match(executorToml, /resolved_model: gpt-6-astra/);
       assert.match(executorToml, /model_reasoning_effort = "medium"/);
 
       const skipped = await installNativeAgentConfigs(root, {
@@ -543,9 +546,9 @@ describe("agents/native-config", () => {
         catalogManifest: manifestWithAgents(["executor"]),
       });
       const executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
-      assert.match(executorToml, /model = "gpt-5\.6-sol"/);
-      // After #3779 fix: model_provider is NOT written to agent TOML when it's just inherited from config
-      // Agents inherit it from config.toml at runtime, preventing staleness when provider changes
+      // After #3779 fix: neither model nor model_provider are written when just inherited from config
+      // Agents inherit both from config.toml at runtime, preventing staleness when config changes
+      assert.doesNotMatch(executorToml, /^model = /m, "model should not be baked in when inherited from config (use agentModels for explicit overrides)");
       assert.doesNotMatch(executorToml, /model_provider = "cheapRouter"/, "model_provider should not be baked in when inherited from config");
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
@@ -583,7 +586,9 @@ describe("agents/native-config", () => {
         catalogManifest: manifestWithAgents(["explore"]),
       });
       const exploreToml = await readFile(join(outDir, "explore.toml"), "utf8");
-      assert.match(exploreToml, /model = "gpt-5\.6-luna"/);
+      // Model resolved from env var, not per-agent override; model field not written to prevent staleness
+      assert.doesNotMatch(exploreToml, /^model = /m, "model from env/config should not be baked in");
+      assert.match(exploreToml, /resolved_model: gpt-5\.6-luna/);
       assert.doesNotMatch(exploreToml, /model_provider = /);
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
@@ -612,8 +617,10 @@ describe("agents/native-config", () => {
         catalogManifest: manifestWithAgents(["debugger"]),
       });
       const debuggerToml = await readFile(join(outDir, "debugger.toml"), "utf8");
-      assert.match(debuggerToml, /model = "gpt-5\.2"/);
-      assert.doesNotMatch(debuggerToml, /model = "gpt-5\.6-terra"/);
+      // Agent inherits model from root config at runtime; model field not written to prevent staleness
+      assert.doesNotMatch(debuggerToml, /^model = /m, "model inherited from root config should not be baked in");
+      // Metadata still documents what model was resolved
+      assert.match(debuggerToml, /resolved_model: gpt-5\.2/);
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
@@ -642,8 +649,10 @@ describe("agents/native-config", () => {
         catalogManifest: manifestWithAgents(["debugger"]),
       });
       const debuggerToml = await readFile(join(outDir, "debugger.toml"), "utf8");
-      assert.match(debuggerToml, /model = "gpt-5\.6-terra"/);
-      assert.doesNotMatch(debuggerToml, /model = "gpt-5\.2"/);
+      // Model is resolved from env default (OMX_DEFAULT_STANDARD_MODEL), not root config
+      // Since there's no per-agent override, model field is not written; resolved_model is documented instead
+      assert.doesNotMatch(debuggerToml, /^model = /m, "model from default or config should not be baked in");
+      assert.match(debuggerToml, /resolved_model: gpt-5\.6-terra/);
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
@@ -672,7 +681,9 @@ describe("agents/native-config", () => {
         catalogManifest: manifestWithAgents(["executor"]),
       });
       const executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
-      assert.match(executorToml, /model = "gpt-5\.2"/);
+      // Model from root config is not written to prevent staleness; agents inherit it at runtime
+      assert.doesNotMatch(executorToml, /^model = /m, "model from root config should not be baked in");
+      assert.match(executorToml, /resolved_model: gpt-5\.2/);
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
