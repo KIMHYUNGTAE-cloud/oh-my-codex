@@ -238,6 +238,38 @@ describe('HUD resize hook helpers', () => {
     ]) assert.ok(command.includes(fragment), fragment);
   });
 
+  it('includes timeout in hook-spawned reconcile commands', () => {
+    const base = parseHudResizeHookContext('$7|@3\n', '%1', '%9', {
+      leaderPanePid: '101',
+      hudPanePid: '109',
+    });
+    assert.ok(base);
+    const context = { ...base, ownerId: 'sess-a' };
+    const posixCommand = buildHudLayoutReconcileHookCommand(
+      'tmux',
+      '/repo/dist/cli/omx.js',
+      '%1',
+      context,
+      context.layoutHookSlot,
+      { cwd: '/repo', env: { TMUX: '/tmp/tmux', OMX_SESSION_ID: 'sess-a' } },
+      'darwin',
+    );
+
+    assert.match(posixCommand, /--timeout-ms=30000/);
+
+    const windowsCommand = buildHudLayoutReconcileHookCommand(
+      'tmux.exe',
+      'C:\\repo\\omx.js',
+      '%1',
+      context,
+      context.layoutHookSlot,
+      { cwd: 'C:\\repo', env: { TMUX: 'socket,42,0', OMX_SESSION_ID: 'sess-a' } },
+      'win32',
+    );
+
+    assert.match(windowsCommand, /--timeout-ms=30000/);
+  });
+
   it('reads exact hook health with one non-mutating tmux probe', () => {
     const registrationCalls: string[][] = [];
     const env = {
