@@ -1199,16 +1199,20 @@ export function buildHudLayoutReconcileHookCommand(
     `--timeout-ms=${HUD_WATCH_REPAIR_TIMEOUT_MS}`,
   ].join(' ');
   const layoutContext = { ...context, hookSlot };
+  const timeoutSeconds = Math.ceil(HUD_WATCH_REPAIR_TIMEOUT_MS / 1000);
   if (platform === 'win32') {
     const powerShellEnv = Object.entries(reconcileRuntimeEnv)
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '')
-      .map(([key, value]) => `$env:${key} = '${value.replace(/'/g, "''")}'`)
+      .map(([key, value]) => `$env:${key} = '${value.replace(/'/g, "''")}' `)
       .join('; ');
     const nativeReconcile = `${powerShellEnv}; Set-Location -LiteralPath '${cwd.replace(/'/g, "''")}'; & '${process.execPath.replace(/'/g, "''")}' '${omxBin.replace(/'/g, "''")}' hud --reconcile-tmux --timeout-ms=${HUD_WATCH_REPAIR_TIMEOUT_MS} | Out-Null`;
     const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(nativeReconcile)}`;
     return buildAtomicHudHookCommand(tmuxBin, layoutContext, success, env.TMUX);
   }
-  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(`${reconcile} >/dev/null 2>&1 || true`)}`;
+  // On Unix/macOS, use the 'timeout' command to enforce a hard limit on the reconcile process.
+  // The timeout command will SIGTERM (or SIGKILL after grace period) the child process.
+  const timedReconcile = `timeout ${timeoutSeconds} ${reconcile} >/dev/null 2>&1 || true`;
+  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(timedReconcile)}`;
   return buildAtomicHudHookCommand(tmuxBin, layoutContext, success, env.TMUX);
 }
 

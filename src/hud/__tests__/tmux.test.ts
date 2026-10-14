@@ -255,6 +255,9 @@ describe('HUD resize hook helpers', () => {
       'darwin',
     );
 
+    // On POSIX systems, the timeout should be enforced via the shell 'timeout' command,
+    // not via an in-process timer that cannot fire while blocking operations execute.
+    assert.match(posixCommand, /timeout 30 /);
     assert.match(posixCommand, /--timeout-ms=30000/);
 
     const windowsCommand = buildHudLayoutReconcileHookCommand(
@@ -267,6 +270,8 @@ describe('HUD resize hook helpers', () => {
       'win32',
     );
 
+    // Windows command should still pass the timeout-ms argument for potential future use,
+    // but the actual timeout enforcement is deferred to a parent process or shell-level wrapper.
     assert.match(windowsCommand, /--timeout-ms=30000/);
   });
 

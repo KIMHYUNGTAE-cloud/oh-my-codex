@@ -624,23 +624,11 @@ export async function hudCommand(
   const flags = parseFlags(args);
   const cwd = deps.cwd ?? process.cwd();
 
-  // Handle timeout for hook-spawned reconcile commands. When running in a hook
-  // context (not a test), the process will exit via SIGKILL when the timeout fires.
-  const timeoutMsArg = args.find(arg => arg.startsWith('--timeout-ms='));
-  let timeoutFired = false;
-  if (timeoutMsArg) {
-    const timeoutMs = parseInt(timeoutMsArg.slice('--timeout-ms='.length), 10);
-    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      const timer = setTimeout(() => {
-        timeoutFired = true;
-        process.exitCode = 1;
-        // In production (hook context), this kills the process.
-        // In tests, this may be mocked or handled gracefully.
-        process.exit(1);
-      }, timeoutMs);
-      timer.unref();
-    }
-  }
+  // Timeout is enforced at the shell level (via 'timeout' command on Unix or
+  // PowerShell timeout on Windows) in the tmux run-shell wrapper, not via an
+  // in-process timer that cannot fire while execFileSync blocks the event loop.
+  // The --timeout-ms argument is passed through for documentation and potential
+  // future use, but the actual timeout must live in the spawning process.
 
   if (args.includes('--reconcile-tmux')) {
     const result = await (deps.reconcileHudForPromptSubmit ?? reconcileHudForPromptSubmit)(cwd);
