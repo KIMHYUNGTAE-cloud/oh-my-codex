@@ -167,7 +167,12 @@ describe('HUD resize hook helpers', () => {
     assert.match(registrationCommand(registrations[0]!) ?? '', new RegExp(`sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}`));
     for (const registration of registrations) {
       if (process.platform !== 'win32' && registrationSlot(registration) !== hookSlot) {
-        assert.match(registrationCommand(registration) ?? '', /hud --reconcile-tmux >\/dev\/null 2>&1 \|\| true/);
+        // On POSIX systems, the command should contain the portable timeout pattern:
+        // (sleep N; kill -9 $$) in the background with the reconcile command
+        const cmd = registrationCommand(registration) ?? '';
+        assert.match(cmd, /hud --reconcile-tmux/);
+        assert.match(cmd, /sleep \d+/);
+        assert.match(cmd, /kill -9 \$\$/);
       }
       const suffixIndex = registration[1] === '-w' ? 6 : 5;
       assert.equal(registration[suffixIndex], ';');
@@ -255,9 +260,11 @@ describe('HUD resize hook helpers', () => {
       'darwin',
     );
 
-    // On POSIX systems, the timeout should be enforced via the shell 'timeout' command,
-    // not via an in-process timer that cannot fire while blocking operations execute.
-    assert.match(posixCommand, /timeout 30 /);
+    // On POSIX systems, the timeout should be enforced via a portable shell pattern
+    // using a background sleep + kill, which works on macOS/Linux without GNU tools.
+    // The pattern uses: ( (sleep N; kill -9 $$) & exec command )
+    assert.match(posixCommand, /sleep 30/);
+    assert.match(posixCommand, /kill -9 \$\$/);
     assert.match(posixCommand, /--timeout-ms=30000/);
 
     const windowsCommand = buildHudLayoutReconcileHookCommand(
