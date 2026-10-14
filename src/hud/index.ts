@@ -20,6 +20,7 @@ import {
   HUD_TMUX_ULTRAGOAL_HEIGHT_LINES,
   HUD_WATCH_REPAIR_TIMEOUT_MS,
 } from './constants.js';
+import { spawnReconcileWithTimeout } from './spawn-reconcile-with-timeout.js';
 import { sleep } from '../utils/sleep.js';
 import { runHudAuthorityTick } from './authority.js';
 import { isHudWatchSessionAttached } from './session-attached.js';
@@ -245,41 +246,17 @@ export async function runWatchMode(
         },
       });
       if (!omxEntry) return false;
-      // A tmux run-shell job reports nonzero exits in the user's active pane
-      // even with redirected stderr. Run independently of the pane's shell;
-      // reconciliation may replace this watcher, and retries are best-effort.
-      const child = spawn(process.execPath, [omxEntry, 'hud', '--reconcile-tmux'], {
+      // Spawn the reconcile process with timeout and process tree kill handling.
+      // The helper uses an unreferenced timer to avoid keeping the watcher alive,
+      // and kills the process group on POSIX / process tree on Windows.
+      return spawnReconcileWithTimeout({
+        omxBinary: omxEntry,
         cwd: reconcileCwd,
-        env: { ...dependencies.env, TMUX_PANE: leaderPaneId,
-          OMX_HUD_WATCH_REPAIR: '1', OMX_HUD_WATCH_LEADER_PID: leaderPanePid },
-        stdio: 'ignore',
-        detached: true,
-        windowsHide: true,
+        env: dependencies.env,
+        timeoutMs: dependencies.repairTimeoutMs,
+        leaderPaneId,
+        leaderPanePid,
       });
-      // A child stuck before it runs any JS never exits on its own; bound it
-      // so the watcher can retry instead of waiting on it forever. Not spawn's
-      // `timeout` option: its timer is referenced and would keep a stopped
-      // watcher's process alive until it fires.
-      const killTimer = setTimeout(() => {
-        // The detached child leads its own process group on POSIX; kill the
-        // group so a subprocess it started (tmux) does not outlive it.
-        // Windows has no process groups: `taskkill /T` ends the tree (psmux).
-        try {
-          if (child.pid === undefined) child.kill('SIGKILL');
-          else if (process.platform === 'win32') {
-            execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 5_000 });
-          } else process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          child.kill('SIGKILL');
-        }
-      }, dependencies.repairTimeoutMs);
-      killTimer.unref();
-      const settled = new Promise<boolean>((resolve) => {
-        child.once('error', () => { clearTimeout(killTimer); resolve(false); });
-        child.once('close', (code) => { clearTimeout(killTimer); resolve(code === 0); });
-      });
-      child.unref();
-      return settled;
     }),
     writeStdout: deps.writeStdout ?? ((text: string) => process.stdout.write(text)),
     writeStderr: deps.writeStderr ?? ((text: string) => process.stderr.write(text)),

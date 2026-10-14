@@ -167,12 +167,8 @@ describe('HUD resize hook helpers', () => {
     assert.match(registrationCommand(registrations[0]!) ?? '', new RegExp(`sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}`));
     for (const registration of registrations) {
       if (process.platform !== 'win32' && registrationSlot(registration) !== hookSlot) {
-        // On POSIX systems, the command should contain the portable timeout pattern:
-        // (sleep N; kill -9 $$) in the background with the reconcile command
-        const cmd = registrationCommand(registration) ?? '';
-        assert.match(cmd, /hud --reconcile-tmux/);
-        assert.match(cmd, /sleep \d+/);
-        assert.match(cmd, /kill -9 \$\$/);
+        // Hook-spawned reconcile runs without timeout wrapper
+        assert.match(registrationCommand(registration) ?? '', /hud --reconcile-tmux/);
       }
       const suffixIndex = registration[1] === '-w' ? 6 : 5;
       assert.equal(registration[suffixIndex], ';');
@@ -243,7 +239,7 @@ describe('HUD resize hook helpers', () => {
     ]) assert.ok(command.includes(fragment), fragment);
   });
 
-  it('includes timeout in hook-spawned reconcile commands', () => {
+  it('registers hook-spawned reconcile commands without timeout wrapper', () => {
     const base = parseHudResizeHookContext('$7|@3\n', '%1', '%9', {
       leaderPanePid: '101',
       hudPanePid: '109',
@@ -260,12 +256,10 @@ describe('HUD resize hook helpers', () => {
       'darwin',
     );
 
-    // On POSIX systems, the timeout should be enforced via a portable shell pattern
-    // using a background sleep + kill, which works on macOS/Linux without GNU tools.
-    // The pattern uses: ( (sleep N; kill -9 $$) & exec command )
-    assert.match(posixCommand, /sleep 30/);
-    assert.match(posixCommand, /kill -9 \$\$/);
-    assert.match(posixCommand, /--timeout-ms=30000/);
+    // Hook-spawned reconcile runs without timeout wrapper; the watcher spawns
+    // with timeout + tree-kill via spawn() on POSIX and taskkill on Windows.
+    assert.match(posixCommand, /hud --reconcile-tmux/);
+    assert.match(posixCommand, />\s*\/dev\/null/);
 
     const windowsCommand = buildHudLayoutReconcileHookCommand(
       'tmux.exe',
@@ -277,9 +271,8 @@ describe('HUD resize hook helpers', () => {
       'win32',
     );
 
-    // Windows command should still pass the timeout-ms argument for potential future use,
-    // but the actual timeout enforcement is deferred to a parent process or shell-level wrapper.
-    assert.match(windowsCommand, /--timeout-ms=30000/);
+    // Windows command should also run the reconcile without timeout wrapper.
+    assert.match(windowsCommand, /hud --reconcile-tmux/);
   });
 
   it('reads exact hook health with one non-mutating tmux probe', () => {

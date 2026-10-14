@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'child_process';
 import { existsSync, realpathSync } from 'fs';
 import { resolve } from 'node:path';
-import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_HEIGHT_LINES, HUD_TMUX_MAX_HEIGHT_LINES, HUD_WATCH_REPAIR_TIMEOUT_MS } from './constants.js';
+import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_HEIGHT_LINES, HUD_TMUX_MAX_HEIGHT_LINES } from './constants.js';
 import { resolveTmuxBinaryForPlatform } from '../utils/platform-command.js';
 import { resolveOmxCliEntryPath } from '../utils/paths.js';
 
@@ -1196,25 +1196,18 @@ export function buildHudLayoutReconcileHookCommand(
     shellEscapeSingle(omxBin),
     'hud',
     '--reconcile-tmux',
-    `--timeout-ms=${HUD_WATCH_REPAIR_TIMEOUT_MS}`,
   ].join(' ');
   const layoutContext = { ...context, hookSlot };
-  const timeoutSeconds = Math.ceil(HUD_WATCH_REPAIR_TIMEOUT_MS / 1000);
   if (platform === 'win32') {
     const powerShellEnv = Object.entries(reconcileRuntimeEnv)
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '')
-      .map(([key, value]) => `$env:${key} = '${value.replace(/'/g, "''")}'  `)
+      .map(([key, value]) => `$env:${key} = '${value.replace(/'/g, "''")}' `)
       .join('; ');
-    const nativeReconcile = `${powerShellEnv}; Set-Location -LiteralPath '${cwd.replace(/'/g, "''")}'; & '${process.execPath.replace(/'/g, "''")}' '${omxBin.replace(/'/g, "''")}' hud --reconcile-tmux --timeout-ms=${HUD_WATCH_REPAIR_TIMEOUT_MS} | Out-Null`;
+    const nativeReconcile = `${powerShellEnv}; Set-Location -LiteralPath '${cwd.replace(/'/g, "''")}'; & '${process.execPath.replace(/'/g, "''")}' '${omxBin.replace(/'/g, "''")}' hud --reconcile-tmux | Out-Null`;
     const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(nativeReconcile)}`;
     return buildAtomicHudHookCommand(tmuxBin, layoutContext, success, env.TMUX);
   }
-  // On Unix/macOS, enforce the timeout portably using a background killer process.
-  // This avoids depending on GNU 'timeout' (not available on stock macOS).
-  // Pattern: (sleep N & killer_pid=$!; trap "kill $killer_pid 2>/dev/null" EXIT; command)
-  // When command finishes, trap kills the sleep; when sleep finishes, it kills the subshell.
-  const portableTimedReconcile = `( ( sleep ${timeoutSeconds} 2>/dev/null; kill -9 $$ 2>/dev/null ) & exec ${reconcile} ) >/dev/null 2>&1 || true`;
-  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(portableTimedReconcile)}`;
+  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(`${reconcile} >/dev/null 2>&1 || true`)}`;
   return buildAtomicHudHookCommand(tmuxBin, layoutContext, success, env.TMUX);
 }
 
