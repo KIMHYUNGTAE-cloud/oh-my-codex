@@ -278,6 +278,7 @@ describe('HUD resize hook helpers', () => {
     assert.match(windowsCommand, /Start-Process/);
     assert.match(windowsCommand, /WaitForExit\(35000\)/);
     assert.match(windowsCommand, /taskkill\.exe \/PID \$child\.Id \/T \/F/);
+    assert.doesNotMatch(windowsCommand, /RedirectStandard(Output|Error)/);
   });
 
   it('bounds POSIX Node startup before CLI dispatch with the shell supervisor', () => {
