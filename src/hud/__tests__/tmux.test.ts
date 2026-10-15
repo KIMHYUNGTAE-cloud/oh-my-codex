@@ -260,7 +260,7 @@ describe('HUD resize hook helpers', () => {
 
     assert.match(posixCommand, /hud --reconcile-tmux --reconcile-timeout-ms=30000/);
     assert.match(posixCommand, /OMX_ENTRY_PATH=/);
-    assert.match(posixCommand, />\s*\/dev\/null/);
+    assert.match(posixCommand, /\)\s*>\s*\/dev\/null 2>&1 \|\| true/);
     assert.doesNotMatch(posixCommand, /\btimeout\s/);
 
     const windowsCommand = buildHudLayoutReconcileHookCommand(

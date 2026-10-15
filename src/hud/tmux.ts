@@ -1220,7 +1220,7 @@ export function buildHudLayoutReconcileHookCommand(
     reconcile,
     HUD_WATCH_REPAIR_TIMEOUT_MS + HUD_HOOK_NODE_STARTUP_GRACE_MS,
   );
-  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(`${supervisor} >/dev/null 2>&1 || true`)}`;
+  const success = `${buildHudHookSelfUnregister(layoutContext)} ; run-shell -b ${quoteHudHookShellArgument(`(${supervisor}) >/dev/null 2>&1 || true`)}`;
   return buildAtomicHudHookCommand(tmuxBin, layoutContext, success, env.TMUX);
 }
 
