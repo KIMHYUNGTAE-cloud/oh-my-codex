@@ -1,110 +1,107 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { spawn } from 'child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnReconcileWithTimeout } from '../spawn-reconcile-with-timeout.js';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve, join } from 'node:path';
-import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const tmpDir = join(__dirname, '.tmp-reconcile-tests');
-
-test('setup test directory', () => {
+test('spawnReconcileWithTimeout passes reconcile authority to the child', async () => {
+  const testDir = await mkdtemp(join(tmpdir(), 'omx-hud-reconcile-success-'));
   try {
-    mkdirSync(tmpDir, { recursive: true });
-  } catch {
-    // Already exists
+    const entry = join(testDir, 'reconcile.mjs');
+    const reportPath = join(testDir, 'report.json');
+    await writeFile(entry, [
+      "import { writeFileSync } from 'node:fs';",
+      'writeFileSync(process.env.OMX_TEST_REPORT, JSON.stringify({ args: process.argv.slice(2), repair: process.env.OMX_HUD_WATCH_REPAIR, pane: process.env.TMUX_PANE, leaderPid: process.env.OMX_HUD_WATCH_LEADER_PID }));',
+    ].join('\n'));
+
+    const completed = await spawnReconcileWithTimeout({
+      omxBinary: entry,
+      cwd: testDir,
+      env: { ...process.env, OMX_TEST_REPORT: reportPath },
+      timeoutMs: 5_000,
+      leaderPaneId: '%1',
+      leaderPanePid: '101',
+      keepAlive: true,
+    });
+
+    assert.equal(completed, true);
+    assert.deepEqual(JSON.parse(await readFile(reportPath, 'utf8')), {
+      args: ['hud', '--reconcile-tmux'],
+      repair: '1',
+      pane: '%1',
+      leaderPid: '101',
+    });
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
   }
 });
 
-test('spawnReconcileWithTimeout kills a hung child process via timeout', async () => {
-  // Create a test Node script that hangs indefinitely
-  const testScript = join(tmpDir, 'hung-process.js');
-  writeFileSync(testScript, 'setInterval(() => {}, 1000);');
+test('spawnReconcileWithTimeout kills a hung child and its process tree', async () => {
+  const testDir = await mkdtemp(join(tmpdir(), 'omx-hud-reconcile-timeout-'));
+  const childPidPath = join(testDir, 'child.pid');
+  const grandchildPidPath = join(testDir, 'grandchild.pid');
+  const markerPath = join(testDir, 'grandchild-survived');
 
-  const timeoutMs = 200;
-  const startTime = Date.now();
+  try {
+    const entry = join(testDir, 'hung-reconcile.mjs');
+    await writeFile(entry, [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      'writeFileSync(process.env.OMX_TEST_CHILD_PID, String(process.pid));',
+      `const grandchild = spawn(process.execPath, ['-e', 'setTimeout(() => require("node:fs").writeFileSync(process.env.OMX_TEST_MARKER, "alive"), 1200); setInterval(() => {}, 1000);'], { stdio: 'ignore', env: process.env });`,
+      'writeFileSync(process.env.OMX_TEST_GRANDCHILD_PID, String(grandchild.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join('\n'));
 
-  // Spawn a process that will hang and should be killed by the timeout
-  const child = spawn(process.execPath, [testScript], {
-    stdio: 'ignore',
-    detached: true,
-  });
+    const startedAt = Date.now();
+    const completed = await spawnReconcileWithTimeout({
+      omxBinary: entry,
+      cwd: testDir,
+      env: {
+        ...process.env,
+        OMX_TEST_CHILD_PID: childPidPath,
+        OMX_TEST_GRANDCHILD_PID: grandchildPidPath,
+        OMX_TEST_MARKER: markerPath,
+      },
+      timeoutMs: 500,
+      keepAlive: true,
+    });
 
-  const childPid = child.pid;
-  assert.ok(childPid, 'Child process spawned with valid PID');
-
-  // Give the child time to start
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  // Create a timeout mechanism similar to what spawnReconcileWithTimeout does
-  let killed = false;
-  const killTimer = setTimeout(() => {
-    try {
-      if (process.platform === 'win32') {
-        // Windows would use taskkill; we test the POSIX path here
-        child.kill('SIGKILL');
-      } else {
-        // POSIX: kill the process group
-        if (childPid) process.kill(-childPid, 'SIGKILL');
+    assert.equal(completed, false);
+    assert.ok(Date.now() - startedAt < 7_000, 'the hung reconcile is bounded');
+    assert.ok((await readFile(childPidPath, 'utf8')).trim().length > 0, 'reconcile child started');
+    assert.ok((await readFile(grandchildPidPath, 'utf8')).trim().length > 0, 'reconcile grandchild started');
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    await assert.rejects(readFile(markerPath), { code: 'ENOENT' }, 'the grandchild was killed with the reconcile child');
+  } finally {
+    for (const pidPath of [childPidPath, grandchildPidPath]) {
+      const pid = Number(await readFile(pidPath, 'utf8').catch(() => ''));
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // The timeout may already have killed the process.
+        }
       }
-      killed = true;
-    } catch {
-      child.kill('SIGKILL');
     }
-  }, timeoutMs);
-  killTimer.unref();
-
-  // Wait for the process to exit
-  await new Promise<void>((resolve) => {
-    child.once('error', () => {
-      clearTimeout(killTimer);
-      resolve();
-    });
-    child.once('close', () => {
-      clearTimeout(killTimer);
-      resolve();
-    });
-  });
-
-  const elapsedMs = Date.now() - startTime;
-
-  // Process should have been killed by the timeout
-  assert.ok(killed || elapsedMs < timeoutMs + 100, 'Timeout killed the process');
-  assert.ok(elapsedMs < 1000, 'Process exited much faster than the hang interval');
-
-  try {
-    unlinkSync(testScript);
-  } catch {
-    // Already deleted
+    await rm(testDir, { recursive: true, force: true });
   }
 });
 
-test('spawnReconcileWithTimeout returns false on spawn error', async () => {
-  // Test with non-existent binary path
-  const result = await spawnReconcileWithTimeout({
-    omxBinary: '/nonexistent/path/to/omx.js',
-    cwd: process.cwd(),
-    env: process.env,
-    timeoutMs: 5000,
-    platform: 'linux',
-  });
+test('spawnReconcileWithTimeout returns false when the reconcile child fails', async () => {
+  const testDir = await mkdtemp(join(tmpdir(), 'omx-hud-reconcile-error-'));
+  try {
+    const result = await spawnReconcileWithTimeout({
+      omxBinary: join(testDir, 'missing-entry.mjs'),
+      cwd: testDir,
+      env: process.env,
+      timeoutMs: 5_000,
+      keepAlive: true,
+    });
 
-  assert.equal(result, false, 'Returns false when spawn fails');
-});
-
-test('spawnReconcileWithTimeout applies timeout correctly on POSIX', async () => {
-  // Verify the helper correctly uses process.kill(-pid) on POSIX platforms
-  assert.ok(true, 'POSIX timeout mechanism verified via process group kill');
-});
-
-test('spawnReconcileWithTimeout uses taskkill on Windows', async () => {
-  // Windows taskkill is tested by passing platform: 'win32' to the helper
-  assert.ok(true, 'Windows timeout mechanism verified via taskkill /T /F');
-});
-
-test('cleanup test directory', () => {
-  // In a real scenario, we'd clean up the temp directory
-  // For now, we leave it for inspection or manual cleanup
-  assert.ok(tmpDir, 'Temp directory path available for inspection');
+    assert.equal(result, false);
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
 });

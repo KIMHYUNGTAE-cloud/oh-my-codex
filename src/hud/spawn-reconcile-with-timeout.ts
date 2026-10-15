@@ -1,5 +1,4 @@
-import { spawn } from 'child_process';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 
 export interface SpawnReconcileOptions {
   omxBinary: string;
@@ -8,6 +7,7 @@ export interface SpawnReconcileOptions {
   timeoutMs: number;
   leaderPaneId?: string;
   leaderPanePid?: string;
+  keepAlive?: boolean;
   platform?: NodeJS.Platform;
 }
 
@@ -15,7 +15,9 @@ export interface SpawnReconcileOptions {
  * Spawn the reconcile process with timeout and process tree kill on both POSIX and Windows.
  * On POSIX, kills the process group to terminate any child processes.
  * On Windows, uses taskkill /T to kill the process tree.
- * The timeout is handled via an unreferenced timer to avoid keeping the parent alive.
+ * Callers that must wait for the result before exiting can keep the child and
+ * timeout referenced; the long-running watcher leaves them unreferenced so
+ * stopping the watcher is not delayed by an in-flight repair.
  */
 export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions): Promise<boolean> {
   const {
@@ -25,6 +27,7 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
     timeoutMs,
     leaderPaneId,
     leaderPanePid,
+    keepAlive = false,
     platform = process.platform,
   } = options;
 
@@ -48,9 +51,8 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
   });
 
   // A child stuck before it runs any JS never exits on its own; bound it
-  // so the watcher can retry instead of waiting on it forever. Not spawn's
-  // `timeout` option: its timer is referenced and would keep a stopped
-  // watcher's process alive until it fires.
+  // so the watcher can retry instead of waiting on it forever. The hook wrapper
+  // keeps this timer referenced so the wrapper cannot exit before it fires.
   const killTimer = setTimeout(() => {
     // The detached child leads its own process group on POSIX; kill the
     // group so a subprocess it started (tmux) does not outlive it.
@@ -71,8 +73,7 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
       child.kill('SIGKILL');
     }
   }, timeoutMs);
-
-  killTimer.unref();
+  if (!keepAlive) killTimer.unref();
 
   const settled = new Promise<boolean>((resolve) => {
     child.once('error', () => {
@@ -85,6 +86,6 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
     });
   });
 
-  child.unref();
+  if (!keepAlive) child.unref();
   return settled;
 }

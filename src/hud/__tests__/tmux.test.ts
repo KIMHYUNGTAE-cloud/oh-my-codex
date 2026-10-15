@@ -167,8 +167,7 @@ describe('HUD resize hook helpers', () => {
     assert.match(registrationCommand(registrations[0]!) ?? '', new RegExp(`sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}`));
     for (const registration of registrations) {
       if (process.platform !== 'win32' && registrationSlot(registration) !== hookSlot) {
-        // Hook-spawned reconcile runs without timeout wrapper
-        assert.match(registrationCommand(registration) ?? '', /hud --reconcile-tmux/);
+        assert.match(registrationCommand(registration) ?? '', /--reconcile-timeout-ms=30000/);
       }
       const suffixIndex = registration[1] === '-w' ? 6 : 5;
       assert.equal(registration[suffixIndex], ';');
@@ -233,13 +232,13 @@ describe('HUD resize hook helpers', () => {
 
     for (const fragment of [
       '$env:TMUX', '$env:TMUX_PANE', '$env:OMX_TMUX_HUD_OWNER', '$env:OMX_HUD_WATCH_REPAIR',
-      '$env:OMX_HUD_WATCH_LEADER_PID', '$env:OMX_SESSION_ID', '$env:OMX_ROOT',
+      '$env:OMX_HUD_WATCH_LEADER_PID', '$env:OMX_ENTRY_PATH', '$env:OMX_SESSION_ID', '$env:OMX_ROOT',
       '$env:OMX_STATE_ROOT', '$env:OMX_TEAM_STATE_ROOT',
       'socket,42,0', '%1', '101', 'sess-a', 'C:\\repo', 'C:\\state', 'C:\\team',
     ]) assert.ok(command.includes(fragment), fragment);
   });
 
-  it('registers hook-spawned reconcile commands without timeout wrapper', () => {
+  it('registers hook-spawned reconcile commands with a portable parent watchdog', () => {
     const base = parseHudResizeHookContext('$7|@3\n', '%1', '%9', {
       leaderPanePid: '101',
       hudPanePid: '109',
@@ -256,10 +255,10 @@ describe('HUD resize hook helpers', () => {
       'darwin',
     );
 
-    // Hook-spawned reconcile runs without timeout wrapper; the watcher spawns
-    // with timeout + tree-kill via spawn() on POSIX and taskkill on Windows.
-    assert.match(posixCommand, /hud --reconcile-tmux/);
+    assert.match(posixCommand, /hud --reconcile-tmux --reconcile-timeout-ms=30000/);
+    assert.match(posixCommand, /OMX_ENTRY_PATH=/);
     assert.match(posixCommand, />\s*\/dev\/null/);
+    assert.doesNotMatch(posixCommand, /\btimeout\s/);
 
     const windowsCommand = buildHudLayoutReconcileHookCommand(
       'tmux.exe',
@@ -271,8 +270,8 @@ describe('HUD resize hook helpers', () => {
       'win32',
     );
 
-    // Windows command should also run the reconcile without timeout wrapper.
-    assert.match(windowsCommand, /hud --reconcile-tmux/);
+    assert.match(windowsCommand, /hud --reconcile-tmux --reconcile-timeout-ms=30000/);
+    assert.match(windowsCommand, /\$env:OMX_ENTRY_PATH/);
   });
 
   it('reads exact hook health with one non-mutating tmux probe', () => {

@@ -10,7 +10,7 @@
  *   omx hud --reconcile-tmux
  */
 
-import { execFileSync, spawn } from 'child_process';
+import { execFileSync } from 'child_process';
 import { readlinkSync, realpathSync } from 'node:fs';
 import { readAllState, readHudConfig, readHudLayoutProjection } from './state.js';
 import { getHudRenderMaxLines, renderHud } from './render.js';
@@ -54,8 +54,19 @@ export const HUD_USAGE = [
   '  omx hud --json       Output raw state as JSON',
   '  omx hud --preset=X   Use preset: minimal, focused, full',
   '  omx hud --tmux       Open HUD in a tmux split pane (auto-detects orientation)',
-  '  omx hud --reconcile-tmux',
+  '  omx hud --reconcile-tmux [--reconcile-timeout-ms=N]',
 ].join('\n');
+
+function parseReconcileTimeoutMs(args: string[]): number | null | undefined {
+  const timeoutArgs = args.filter((arg) => arg.startsWith('--reconcile-timeout-ms='));
+  if (timeoutArgs.length === 0) return undefined;
+  if (timeoutArgs.length !== 1) return null;
+
+  const rawTimeout = timeoutArgs[0]!.slice('--reconcile-timeout-ms='.length);
+  if (!/^[1-9]\d*$/.test(rawTimeout)) return null;
+  const timeoutMs = Number(rawTimeout);
+  return Number.isSafeInteger(timeoutMs) && timeoutMs <= 2_147_483_647 ? timeoutMs : null;
+}
 
 type SleepFn = (ms: number, signal?: AbortSignal) => Promise<void>;
 
@@ -590,7 +601,10 @@ export async function hudCommand(
   args: string[],
   deps: {
     cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    omxEntryPath?: string;
     reconcileHudForPromptSubmit?: typeof reconcileHudForPromptSubmit;
+    spawnReconcileWithTimeoutFn?: typeof spawnReconcileWithTimeout;
   } = {},
 ): Promise<void> {
   if (args[0] === '--help' || args[0] === '-h') {
@@ -601,13 +615,34 @@ export async function hudCommand(
   const flags = parseFlags(args);
   const cwd = deps.cwd ?? process.cwd();
 
-  // Timeout is enforced at the shell level (via 'timeout' command on Unix or
-  // PowerShell timeout on Windows) in the tmux run-shell wrapper, not via an
-  // in-process timer that cannot fire while execFileSync blocks the event loop.
-  // The --timeout-ms argument is passed through for documentation and potential
-  // future use, but the actual timeout must live in the spawning process.
-
   if (args.includes('--reconcile-tmux')) {
+    const timeoutMs = parseReconcileTimeoutMs(args);
+    if (timeoutMs !== undefined) {
+      if (timeoutMs === null) {
+        process.exitCode = 1;
+        return;
+      }
+
+      const env = deps.env ?? process.env;
+      const omxEntryPath = deps.omxEntryPath ?? resolveOmxCliEntryPath({ cwd, env });
+      if (!omxEntryPath) {
+        process.exitCode = 1;
+        return;
+      }
+
+      const completed = await (deps.spawnReconcileWithTimeoutFn ?? spawnReconcileWithTimeout)({
+        omxBinary: omxEntryPath,
+        cwd,
+        env,
+        timeoutMs,
+        leaderPaneId: env.TMUX_PANE,
+        leaderPanePid: env.OMX_HUD_WATCH_LEADER_PID,
+        keepAlive: true,
+      });
+      if (!completed) process.exitCode = 1;
+      return;
+    }
+
     const result = await (deps.reconcileHudForPromptSubmit ?? reconcileHudForPromptSubmit)(cwd);
     if (result.status === 'failed') {
       process.exitCode = 1;
