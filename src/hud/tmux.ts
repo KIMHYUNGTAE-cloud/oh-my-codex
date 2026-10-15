@@ -1238,10 +1238,10 @@ export function buildWindowsHudReconcileSupervisorCommand(
   const quotePowerShellLiteral = (value: string): string => `'${value.replace(/'/g, "''")}'`;
   const childArguments = `"${omxBinary}" hud --reconcile-tmux --reconcile-timeout-ms=${HUD_WATCH_REPAIR_TIMEOUT_MS}`;
   return [
-    `try { $child = Start-Process -FilePath ${quotePowerShellLiteral(nodePath)} -ArgumentList ${quotePowerShellLiteral(childArguments)} -WorkingDirectory ${quotePowerShellLiteral(cwd)} -PassThru -WindowStyle Hidden -ErrorAction Stop } catch { exit 1 }`,
-    `if ($child.WaitForExit(${timeoutMs})) { exit $child.ExitCode }`,
+    `try { $child = Start-Process -FilePath ${quotePowerShellLiteral(nodePath)} -ArgumentList ${quotePowerShellLiteral(childArguments)} -WorkingDirectory ${quotePowerShellLiteral(cwd)} -PassThru -WindowStyle Hidden -ErrorAction Stop } catch { exit 0 }`,
+    `if ($child.WaitForExit(${timeoutMs})) { exit 0 }`,
     'try { & taskkill.exe /PID $child.Id /T /F | Out-Null } catch { try { $child.Kill() } catch {} }',
-    'exit 1',
+    'exit 0',
   ].join('; ');
 }
 

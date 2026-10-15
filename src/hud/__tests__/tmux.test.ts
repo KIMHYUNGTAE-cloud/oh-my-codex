@@ -279,6 +279,8 @@ describe('HUD resize hook helpers', () => {
     assert.match(windowsCommand, /Start-Process/);
     assert.match(windowsCommand, /WaitForExit\(35000\)/);
     assert.match(windowsCommand, /taskkill\.exe \/PID \$child\.Id \/T \/F/);
+    assert.match(windowsCommand, /exit 0/);
+    assert.doesNotMatch(windowsCommand, /exit 1|ExitCode/);
     assert.doesNotMatch(windowsCommand, /RedirectStandard(Output|Error)/);
   });
 
@@ -320,7 +322,7 @@ describe('HUD resize hook helpers', () => {
       });
 
       assert.equal(result.error, undefined);
-      assert.equal(result.status, 1);
+      assert.equal(result.status, 0);
       assert.ok(Date.now() - startedAt < 7_000, 'PowerShell kills Node before the outer test timeout');
     } finally {
       rmSync(testDir, { recursive: true, force: true });
