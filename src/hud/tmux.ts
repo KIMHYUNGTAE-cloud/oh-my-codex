@@ -1227,7 +1227,7 @@ export function buildHudLayoutReconcileHookCommand(
 export function buildPosixHudReconcileSupervisorCommand(command: string, timeoutMs: number): string {
   const shutdownGraceSeconds = 2;
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1_000) - shutdownGraceSeconds);
-  return `${command} & child=$!; (trap "kill \"\$s\" 2>/dev/null || :; exit" TERM; sleep ${timeoutSeconds} & s=$!; wait "$s" && { kill -TERM "$child" 2>/dev/null || :; sleep ${shutdownGraceSeconds} & s=$!; wait "$s" || :; kill -KILL "$child" 2>/dev/null || :; } || :) & watchdog=$!; wait "$child"; status=$?; kill -TERM "$watchdog" 2>/dev/null || :; wait "$watchdog" 2>/dev/null || :; exit "$status"`;
+  return `watchdog_dir=$(mktemp -d "\${TMPDIR:-/tmp}/omx-hud-watchdog.XXXXXX") || exit 0; ready_fifo=$watchdog_dir/ready; mkfifo "$ready_fifo" || { rmdir "$watchdog_dir"; exit 0; }; ${command} & child=$!; (trap 'kill "$s" 2>/dev/null || :; wait "$s" 2>/dev/null || :; exit' TERM; sleep ${timeoutSeconds} & s=$!; printf 'ready\\n' > "$ready_fifo"; wait "$s" && { kill -TERM "$child" 2>/dev/null || :; sleep ${shutdownGraceSeconds} & s=$!; wait "$s" || :; kill -KILL "$child" 2>/dev/null || :; } || :) & watchdog=$!; IFS= read -r _ < "$ready_fifo"; wait "$child"; status=$?; kill -TERM "$watchdog" 2>/dev/null || :; wait "$watchdog" 2>/dev/null || :; rm -f "$ready_fifo"; rmdir "$watchdog_dir" 2>/dev/null || :; exit "$status"`;
 }
 
 export function buildWindowsHudReconcileSupervisorCommand(

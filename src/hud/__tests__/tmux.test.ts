@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -293,18 +293,52 @@ describe('HUD resize hook helpers', () => {
       writeFileSync(entry, 'while (true) {}');
       const command = `exec env OMX_TEST=ready ${shellEscapeSingle(process.execPath)} ${shellEscapeSingle(entry)}`;
       const startedAt = Date.now();
+      const supervisor = buildPosixHudReconcileSupervisorCommand(command, 1_000);
       const result = spawnSync(
         '/bin/sh',
-        ['-c', buildPosixHudReconcileSupervisorCommand(command, 1_000)],
+        ['-c', `(${supervisor}) >/dev/null 2>&1 || true`],
         { encoding: 'utf8', timeout: 5_000 },
       );
 
       assert.equal(result.error, undefined);
-      assert.ok([137, 143].includes(result.status ?? -1));
+      assert.equal(result.status, 0);
       assert.ok(Date.now() - startedAt < 4_000, 'the external watchdog exits promptly');
-      const supervisor = buildPosixHudReconcileSupervisorCommand(command, 1_000);
+      assert.ok(supervisor.includes(`trap 'kill "$s" 2>/dev/null || :; wait "$s" 2>/dev/null || :; exit' TERM`));
+      assert.match(supervisor, /mkfifo "\$ready_fifo"/);
       assert.match(supervisor, /kill -TERM "\$child"/);
       assert.match(supervisor, /kill -KILL "\$child"/);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reaps the POSIX watchdog sleep when reconciliation completes early', () => {
+    if (process.platform === 'win32') return;
+
+    const testDir = mkdtempSync(join(tmpdir(), 'omx-hud-shell-watchdog-cleanup-'));
+    const binDir = join(testDir, 'bin');
+    const sleepPidPath = join(testDir, 'sleep.pid');
+
+    try {
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, 'sleep'), '#!/bin/sh\nprintf "%s\\n" "$$" >> "$OMX_TEST_SLEEP_PIDS"\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+      const command = buildPosixHudReconcileSupervisorCommand('/bin/sleep 0.1', 10_000);
+      const result = spawnSync('/bin/sh', ['-c', `(${command}) >/dev/null 2>&1 || true`], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          OMX_TEST_SLEEP_PIDS: sleepPidPath,
+        },
+        timeout: 5_000,
+      });
+
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0);
+      assert.ok(existsSync(sleepPidPath), 'the watchdog started its sleep process');
+      const sleepPid = Number(readFileSync(sleepPidPath, 'utf8').trim());
+      assert.ok(Number.isSafeInteger(sleepPid) && sleepPid > 0);
+      assert.throws(() => process.kill(sleepPid, 0), { code: 'ESRCH' }, 'the watchdog reaps its sleep process');
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
