@@ -1225,8 +1225,9 @@ export function buildHudLayoutReconcileHookCommand(
 }
 
 export function buildPosixHudReconcileSupervisorCommand(command: string, timeoutMs: number): string {
-  const timeoutSeconds = Math.ceil(timeoutMs / 1_000);
-  return `${command} & child=$!; (trap "kill \"\$s\" 2>/dev/null || :; exit" TERM; sleep ${timeoutSeconds} & s=$!; wait "$s" && kill -KILL "$child" 2>/dev/null || :) & watchdog=$!; wait "$child"; status=$?; kill -TERM "$watchdog" 2>/dev/null || :; wait "$watchdog" 2>/dev/null || :; exit "$status"`;
+  const shutdownGraceSeconds = 2;
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1_000) - shutdownGraceSeconds);
+  return `${command} & child=$!; (trap "kill \"\$s\" 2>/dev/null || :; exit" TERM; sleep ${timeoutSeconds} & s=$!; wait "$s" && { kill -TERM "$child" 2>/dev/null || :; sleep ${shutdownGraceSeconds} & s=$!; wait "$s" || :; kill -KILL "$child" 2>/dev/null || :; } || :) & watchdog=$!; wait "$child"; status=$?; kill -TERM "$watchdog" 2>/dev/null || :; wait "$watchdog" 2>/dev/null || :; exit "$status"`;
 }
 
 export function buildWindowsHudReconcileSupervisorCommand(

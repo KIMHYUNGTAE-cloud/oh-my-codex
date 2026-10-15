@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +84,80 @@ test('spawnReconcileWithTimeout kills a hung child and its process tree', async 
         } catch {
           // The timeout may already have killed the process.
         }
+      }
+    }
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test('spawnReconcileWithTimeout kills its detached child when the wrapper receives SIGTERM', async () => {
+  if (process.platform === 'win32') return;
+
+  const testDir = await mkdtemp(join(tmpdir(), 'omx-hud-reconcile-sigterm-'));
+  const entry = join(testDir, 'hung-reconcile.mjs');
+  const wrapper = join(testDir, 'reconcile-wrapper.mjs');
+  const childPidPath = join(testDir, 'child.pid');
+  const markerPath = join(testDir, 'child-survived');
+  let wrapperProcess: ReturnType<typeof spawn> | undefined;
+  let childPid = 0;
+
+  try {
+    await writeFile(entry, [
+      "import { writeFileSync } from 'node:fs';",
+      'writeFileSync(process.env.OMX_TEST_CHILD_PID, String(process.pid));',
+      'setTimeout(() => writeFileSync(process.env.OMX_TEST_MARKER, "alive"), 1_500);',
+      'setInterval(() => {}, 1_000);',
+    ].join('\n'));
+    await writeFile(wrapper, [
+      `import { spawnReconcileWithTimeout } from '${new URL('../spawn-reconcile-with-timeout.js', import.meta.url).href}';`,
+      'await spawnReconcileWithTimeout({',
+      '  omxBinary: process.env.OMX_TEST_ENTRY,',
+      '  cwd: process.env.OMX_TEST_DIR,',
+      '  env: process.env,',
+      '  timeoutMs: 5_000,',
+      '  keepAlive: true,',
+      '});',
+    ].join('\n'));
+
+    const childWrapper = spawn(process.execPath, [wrapper], {
+      cwd: testDir,
+      env: {
+        ...process.env,
+        OMX_TEST_ENTRY: entry,
+        OMX_TEST_DIR: testDir,
+        OMX_TEST_CHILD_PID: childPidPath,
+        OMX_TEST_MARKER: markerPath,
+      },
+      stdio: 'ignore',
+    });
+    wrapperProcess = childWrapper;
+
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && childPid === 0) {
+      const pid = await readFile(childPidPath, 'utf8').catch(() => '');
+      childPid = Number(pid.trim()) || 0;
+      if (childPid === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(childPid > 0, 'the detached reconcile child started');
+
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      childWrapper.once('error', reject);
+      childWrapper.once('close', (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(childWrapper.kill('SIGTERM'), true);
+    const result = await closed;
+
+    assert.equal(result.signal, null);
+    assert.equal(result.code, 0);
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    await assert.rejects(readFile(markerPath), { code: 'ENOENT' }, 'the detached child was killed with its wrapper');
+  } finally {
+    wrapperProcess?.kill('SIGKILL');
+    if (childPid > 0) {
+      try {
+        process.kill(-childPid, 'SIGKILL');
+      } catch {
+        // The wrapper signal handler may already have killed the reconcile process group.
       }
     }
     await rm(testDir, { recursive: true, force: true });

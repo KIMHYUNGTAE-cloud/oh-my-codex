@@ -300,8 +300,11 @@ describe('HUD resize hook helpers', () => {
       );
 
       assert.equal(result.error, undefined);
-      assert.equal(result.status, 137);
+      assert.ok([137, 143].includes(result.status ?? -1));
       assert.ok(Date.now() - startedAt < 4_000, 'the external watchdog exits promptly');
+      const supervisor = buildPosixHudReconcileSupervisorCommand(command, 1_000);
+      assert.match(supervisor, /kill -TERM "\$child"/);
+      assert.match(supervisor, /kill -KILL "\$child"/);
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

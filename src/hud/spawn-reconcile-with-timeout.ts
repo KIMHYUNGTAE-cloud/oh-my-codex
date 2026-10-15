@@ -50,13 +50,10 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
     windowsHide: true,
   });
 
-  // A child stuck before it runs any JS never exits on its own; bound it
-  // so the watcher can retry instead of waiting on it forever. The hook wrapper
-  // keeps this timer referenced so the wrapper cannot exit before it fires.
-  const killTimer = setTimeout(() => {
+  const killChild = (): void => {
     // The detached child leads its own process group on POSIX; kill the
     // group so a subprocess it started (tmux) does not outlive it.
-    // Windows has no process groups: `taskkill /T` ends the tree (psmux).
+    // Windows has no process groups: `taskkill /T` ends the process tree.
     try {
       if (child.pid === undefined) {
         child.kill('SIGKILL');
@@ -72,16 +69,28 @@ export async function spawnReconcileWithTimeout(options: SpawnReconcileOptions):
     } catch {
       child.kill('SIGKILL');
     }
-  }, timeoutMs);
+  };
+
+  const onParentSigterm = keepAlive && platform !== 'win32' ? killChild : undefined;
+  if (onParentSigterm) process.once('SIGTERM', onParentSigterm);
+
+  // A child stuck before it runs any JS never exits on its own; bound it
+  // so the watcher can retry instead of waiting on it forever. The hook wrapper
+  // keeps this timer referenced so the wrapper cannot exit before it fires.
+  const killTimer = setTimeout(killChild, timeoutMs);
   if (!keepAlive) killTimer.unref();
 
   const settled = new Promise<boolean>((resolve) => {
-    child.once('error', () => {
+    const cleanup = (): void => {
       clearTimeout(killTimer);
+      if (onParentSigterm) process.removeListener('SIGTERM', onParentSigterm);
+    };
+    child.once('error', () => {
+      cleanup();
       resolve(false);
     });
     child.once('close', (code) => {
-      clearTimeout(killTimer);
+      cleanup();
       resolve(code === 0);
     });
   });
