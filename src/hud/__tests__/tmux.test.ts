@@ -1,13 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildHudLayoutHookSlot,
   buildHudLayoutReconcileHookCommand,
+  buildPosixHudReconcileSupervisorCommand,
+  buildWindowsHudReconcileSupervisorCommand,
   boundHudHeight,
   buildHudResizeHookName,
   buildHudResizeHookSlot,
@@ -35,6 +37,7 @@ import {
   readHudLeaderOwnerIdentity,
   registerHudResizeHook,
   resizeTmuxPaneIfCurrent,
+  shellEscapeSingle,
   unregisterHudResizeHook,
 } from '../tmux.js';
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS } from '../constants.js';
@@ -272,6 +275,54 @@ describe('HUD resize hook helpers', () => {
 
     assert.match(windowsCommand, /hud --reconcile-tmux --reconcile-timeout-ms=30000/);
     assert.match(windowsCommand, /\$env:OMX_ENTRY_PATH/);
+    assert.match(windowsCommand, /Start-Process/);
+    assert.match(windowsCommand, /WaitForExit\(35000\)/);
+    assert.match(windowsCommand, /taskkill\.exe \/PID \$child\.Id \/T \/F/);
+  });
+
+  it('bounds POSIX Node startup before CLI dispatch with the shell supervisor', () => {
+    if (process.platform === 'win32') return;
+
+    const testDir = mkdtempSync(join(tmpdir(), 'omx-hud-shell-watchdog-'));
+    try {
+      const entry = join(testDir, 'startup-hang.mjs');
+      writeFileSync(entry, 'while (true) {}');
+      const command = `exec ${shellEscapeSingle(process.execPath)} ${shellEscapeSingle(entry)}`;
+      const startedAt = Date.now();
+      const result = spawnSync(
+        '/bin/sh',
+        ['-c', buildPosixHudReconcileSupervisorCommand(command, 1_000)],
+        { encoding: 'utf8', timeout: 5_000 },
+      );
+
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 137);
+      assert.ok(Date.now() - startedAt < 4_000, 'the external watchdog exits promptly');
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds Windows Node startup with the PowerShell supervisor', () => {
+    if (process.platform !== 'win32') return;
+
+    const testDir = mkdtempSync(join(tmpdir(), 'omx-hud-powershell-watchdog-'));
+    try {
+      const entry = join(testDir, 'startup-hang.mjs');
+      writeFileSync(entry, 'while (true) {}');
+      const command = buildWindowsHudReconcileSupervisorCommand(process.execPath, entry, testDir, 1_000);
+      const startedAt = Date.now();
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        encoding: 'utf8',
+        timeout: 8_000,
+      });
+
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 1);
+      assert.ok(Date.now() - startedAt < 7_000, 'PowerShell kills Node before the outer test timeout');
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   it('reads exact hook health with one non-mutating tmux probe', () => {
