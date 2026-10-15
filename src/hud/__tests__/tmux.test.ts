@@ -259,6 +259,7 @@ describe('HUD resize hook helpers', () => {
     );
 
     assert.match(posixCommand, /hud --reconcile-tmux --reconcile-timeout-ms=30000/);
+    assert.match(posixCommand, /exec env TMUX=/);
     assert.match(posixCommand, /OMX_ENTRY_PATH=/);
     assert.match(posixCommand, /\)\s*>\s*\/dev\/null 2>&1 \|\| true/);
     assert.doesNotMatch(posixCommand, /\btimeout\s/);
@@ -288,7 +289,7 @@ describe('HUD resize hook helpers', () => {
     try {
       const entry = join(testDir, 'startup-hang.mjs');
       writeFileSync(entry, 'while (true) {}');
-      const command = `exec ${shellEscapeSingle(process.execPath)} ${shellEscapeSingle(entry)}`;
+      const command = `exec env OMX_TEST=ready ${shellEscapeSingle(process.execPath)} ${shellEscapeSingle(entry)}`;
       const startedAt = Date.now();
       const result = spawnSync(
         '/bin/sh',
