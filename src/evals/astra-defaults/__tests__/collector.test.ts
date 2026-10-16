@@ -150,23 +150,26 @@ test('collector: handle null usage data gracefully', async () => {
 });
 
 test('collector: records latency on success', async () => {
-  const mockCodexInvoker = async (): Promise<CodexOutput> => {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    return {
-      exitCode: 0,
-      stdout: JSON.stringify({
-        type: 'item.completed',
-        item: { type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
-      }) + '\n' + JSON.stringify({
-        type: 'turn.completed',
-      }),
-      stderr: '',
-    };
+  const mockCodexInvoker = async (): Promise<CodexOutput> => ({
+    exitCode: 0,
+    stdout: JSON.stringify({
+      type: 'item.completed',
+      item: { type: 'agent_message', text: 'Found a bug in the code. The variable is used correctly.' },
+    }) + '\n' + JSON.stringify({
+      type: 'turn.completed',
+    }),
+    stderr: '',
+  });
+  let now = 1_000;
+  const clock = () => {
+    const current = now;
+    now += 50;
+    return current;
   };
 
-  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
+  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true, clock });
 
-  assert.ok((result.record.latencyMs ?? 0) > 0);
+  assert.strictEqual(result.record.latencyMs, 50);
 });
 
 test('collector: latency uses a monotonic clock', async () => {
@@ -193,18 +196,21 @@ test('collector: latency uses a monotonic clock', async () => {
 });
 
 test('collector: records latency even on error', async () => {
-  const mockCodexInvoker = async (): Promise<CodexOutput> => {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    return {
-      exitCode: 1,
-      stdout: '',
-      stderr: 'Error',
-    };
+  const mockCodexInvoker = async (): Promise<CodexOutput> => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: 'Error',
+  });
+  let now = 1_000;
+  const clock = () => {
+    const current = now;
+    now += 50;
+    return current;
   };
 
-  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true });
+  const result = await collectRecord(fixture, config, { invokeCodex: mockCodexInvoker, skipGitClone: true, clock });
 
-  assert.ok((result.record.latencyMs ?? 0) > 0);
+  assert.strictEqual(result.record.latencyMs, 50);
 });
 
 test('collector: embeds fixture inputs into prompt', async () => {
