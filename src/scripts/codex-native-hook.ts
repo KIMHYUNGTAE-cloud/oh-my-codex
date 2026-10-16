@@ -21890,22 +21890,26 @@ export async function dispatchCodexNativeHook(
         return { hookEventName, omxEventName, skillState: null, outputJson: null };
       }
       if (!shouldSuppressSubagentLifecycleHookDispatch()) {
-        await dispatchHookEventRuntime({
-          event: buildNativeHookEvent(omxEventName!, {
-            ...buildBaseContext(cwd, payload, hookEventName, sessionId),
-            native_session_id: agentId,
-            codex_session_id: agentId,
-            omx_session_id: sessionId,
-          }, {
-            session_id: sessionId,
-            thread_id: agentId,
-            turn_id: readPayloadTurnId(payload) || undefined,
-            mode: safeString(payload.agent_type).trim() || undefined,
-          }),
-          cwd,
-          ...(pluginDiscoveryCwd ? { pluginDiscoveryCwd } : {}),
-          allowTeamWorkerSideEffects: false,
-        });
+        try {
+          await dispatchHookEventRuntime({
+            event: buildNativeHookEvent(omxEventName!, {
+              ...buildBaseContext(cwd, payload, hookEventName, sessionId),
+              native_session_id: agentId,
+              codex_session_id: agentId,
+              omx_session_id: sessionId,
+            }, {
+              session_id: sessionId,
+              thread_id: agentId,
+              turn_id: readPayloadTurnId(payload) || undefined,
+              mode: safeString(payload.agent_type).trim() || undefined,
+            }),
+            cwd,
+            ...(pluginDiscoveryCwd ? { pluginDiscoveryCwd } : {}),
+            allowTeamWorkerSideEffects: false,
+          });
+        } catch (error) {
+          await logNativeHookCliError(cwd, "native_subagent_completion_dispatch_error", error, payload, { agent_id: agentId });
+        }
       }
     }
     return { hookEventName, omxEventName, skillState: null, outputJson: null };
@@ -22061,7 +22065,23 @@ export async function dispatchCodexNativeHook(
       // never promote itself into a root/leader session or emit an independent
       // session-start notification at session/minimal verbosity.
       isSubagentSessionStart = true;
-      if (canonicalSessionId) {
+      if (authoritativeTeamWorker && authoritativeWorkerPayloadSessionId === nativeSessionId) {
+        // A Team worker shares the leader pointer but owns its native child tree.
+        // Keep descriptive child records under the transcript's immediate parent
+        // instead of trying to bind that parent to the leader tracker.
+        resolvedNativeSessionId = nativeSessionId;
+        recordedNativeSubagentSessionStart = true;
+        await recordNativeSubagentSessionStart(
+          cwd,
+          subagentSessionStart.parentThreadId,
+          nativeSessionId,
+          subagentSessionStart,
+          transcriptPath,
+          "",
+          "absent",
+          implicatedChildThreadIds,
+        );
+      } else if (canonicalSessionId) {
         const belongsToCanonicalSession = await nativeSubagentSessionStartBelongsToCanonicalSession(
           cwd,
           canonicalSessionId,
