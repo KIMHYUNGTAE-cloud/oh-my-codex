@@ -22084,9 +22084,12 @@ export async function dispatchCodexNativeHook(
       isSubagentSessionStart = true;
       if (authoritativeTeamWorker && authoritativeWorkerPayloadSessionId === nativeSessionId) {
         // A Team worker shares the leader pointer but owns its native child tree.
-        // Keep descriptive child records under the transcript's immediate parent
-        // instead of trying to bind that parent to the leader tracker.
+        // Retain descriptive child records under the transcript's immediate parent
+        // without letting this child inherit the leader's session scope.
+        canonicalSessionId = "";
         resolvedNativeSessionId = nativeSessionId;
+        skipCanonicalSessionStartContext = true;
+        allowImplicitSessionSideEffects = false;
         recordedNativeSubagentSessionStart = true;
         await recordNativeSubagentSessionStart(
           cwd,

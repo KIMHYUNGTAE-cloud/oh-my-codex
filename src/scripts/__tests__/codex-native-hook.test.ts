@@ -5296,8 +5296,15 @@ export function onHookEvent(event) {
       const codexHome = join(cwd, "codex-home");
       process.env.CODEX_HOME = codexHome;
       await writeJson(join(codexHome, ".omx-config.json"), {
-        notifications: { enabled: true, includeChildAgents: false },
+        notifications: { enabled: true, includeChildAgents: true },
       });
+      const eventsPath = join(cwd, "team-worker-child-events.jsonl");
+      await mkdir(join(cwd, ".omx", "hooks"), { recursive: true });
+      await writeFile(join(cwd, ".omx", "hooks", "capture.mjs"), `import { appendFileSync } from 'node:fs';
+export function onHookEvent(event) {
+  appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify({ event: event.event, session_id: event.session_id, omx_session_id: event.omx_session_id }) + '\\n');
+}
+`);
 
       const workerSessionId = "team-worker-native-session";
       const childSessionId = "team-worker-child-session";
@@ -5322,6 +5329,7 @@ export function onHookEvent(event) {
         }, { cwd: workerCwd, sessionOwnerPid: process.pid });
       }
 
+      assert.equal(existsSync(eventsPath), false, "Team worker child starts must not dispatch in the leader session scope");
       const trackingAfterStarts = await readSubagentTrackingState(workerCwd);
       assert.equal(trackingAfterStarts.sessions[workerSessionId]?.threads[childSessionId]?.kind, "subagent");
       assert.equal(trackingAfterStarts.sessions[childSessionId]?.threads[grandchildSessionId]?.kind, "subagent");
