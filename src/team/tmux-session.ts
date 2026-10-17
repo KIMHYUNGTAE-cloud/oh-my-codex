@@ -3628,7 +3628,9 @@ export async function waitForWorkerReadyDetailedAsync(
   hudPaneId?: string,
   incompatibility?: { workerCli?: TeamWorkerCli; finalArgs?: readonly string[]; onIncompatible: (reason: typeof CODEX_BYPASS_MDM_INCOMPATIBLE_REASON) => void },
 ): Promise<boolean> {
-  const initialBackoffMs = 150;
+  // For very short timeouts (e.g., test scenarios), use adaptive backoff to allow
+  // multiple check iterations instead of exhausting the timeout on the first sleep.
+  const initialBackoffMs = timeoutMs < 100 ? Math.max(10, Math.floor(timeoutMs / 5)) : 150;
   const maxBackoffMs = 8000;
   const startedAt = Date.now();
   let blockedByTrustPrompt = false;
