@@ -27,6 +27,8 @@ import {
   MANAGED_HOOK_EVENTS,
   ManagedCodexHooksPlanError,
   buildManagedCodexHookTrustState,
+  buildManagedCodexHooksConfig,
+  planManagedCodexHooksRemoval,
   planManagedCodexHooksMerge,
 } from "../codex-hooks.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../omx-first-party-mcp.js";
@@ -2569,6 +2571,115 @@ describe("config generator idempotency (#384)", () => {
     );
     assert.match(repaired, /^enabled = false$/m);
     assertSingleManagedHookTrustState(repaired);
+  });
+
+  it("preserves approved foreign trust beyond OMX coordinates and dedupes repeated banners (#3818)", () => {
+    const hooksPath = "/tmp/codex/hooks.json";
+    const managedTrustState = buildManagedCodexHookTrustState(hooksPath, "/tmp/omx");
+    const managedCommand = buildManagedCodexHooksConfig("/tmp/omx")
+      .hooks.PreToolUse[0]!.hooks[0]!.command;
+    const hooksContent = JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          hooks: [
+            { type: "command", command: managedCommand },
+            { type: "command", command: "echo foreign", timeout: 600 },
+          ],
+        }],
+      },
+    });
+    const removalPlan = planManagedCodexHooksRemoval(hooksContent, hooksPath);
+    assert.equal(removalPlan.ok, true);
+    if (!removalPlan.ok) return;
+    const foreignKey = `${hooksPath}:pre_tool_use:0:1`;
+    const foreignHash = removalPlan.coordinateMoves.find(
+      (move) => move.oldKey === foreignKey,
+    )?.expectedTrustedHash;
+    assert.ok(foreignHash, "fixture must have Codex's expected foreign-hook hash");
+
+    const startMarker = "# OMX-owned Codex hook trust state";
+    const endMarker = "# End OMX-owned Codex hook trust state";
+    const setupConfig = upsertManagedCodexHookTrustState(
+      'model = "gpt-5.6-sol"\n',
+      "/tmp/omx",
+      hooksPath,
+      { managedTrustState },
+    );
+    const repeatedBanners = setupConfig.replace(
+      startMarker,
+      Array.from({ length: 8 }, () => startMarker).join("\n"),
+    );
+    const configWithForeignTrust = repeatedBanners.replace(
+      endMarker,
+      [
+        `[hooks.state.${JSON.stringify(foreignKey)}]`,
+        `trusted_hash = ${JSON.stringify(foreignHash)}`,
+        "",
+        endMarker,
+      ].join("\n"),
+    );
+    const tailForeignKey = `${hooksPath}:foreign_event:0:0`;
+    const configWithRepeatedOuterBanners = [
+      "# oh-my-codex (OMX) Configuration",
+      "# oh-my-codex (OMX) Configuration",
+      configWithForeignTrust,
+      "# End oh-my-codex",
+      `[hooks.state.${JSON.stringify(tailForeignKey)}]`,
+      'trusted_hash = "sha256:approved-foreign-tail"',
+      "",
+    ].join("\n");
+
+    const refreshed = upsertManagedCodexHookTrustState(
+      configWithRepeatedOuterBanners,
+      "/tmp/omx",
+      hooksPath,
+      { managedTrustState },
+    );
+    const parsed = TOML.parse(refreshed) as {
+      hooks?: { state?: Record<string, { trusted_hash?: unknown }> };
+    };
+    assert.equal(parsed.hooks?.state?.[foreignKey]?.trusted_hash, foreignHash);
+    assert.equal(
+      parsed.hooks?.state?.[tailForeignKey]?.trusted_hash,
+      "sha256:approved-foreign-tail",
+    );
+    assert.equal(count(refreshed, /^# OMX-owned Codex hook trust state$/gm), 1);
+    assert.equal(count(refreshed, /^# End OMX-owned Codex hook trust state$/gm), 1);
+    assert.equal(
+      count(refreshed, /^\[hooks\.state\."\/tmp\/codex\/hooks\.json:/gm),
+      Object.keys(managedTrustState).length + 2,
+    );
+    assert.equal(
+      upsertManagedCodexHookTrustState(refreshed, "/tmp/omx", hooksPath, {
+        managedTrustState,
+      }),
+      refreshed,
+      "repeated setup must be idempotent after normalizing legacy banners",
+    );
+
+    const managedKey = `${hooksPath}:pre_tool_use:0:0`;
+    const managedHash = managedTrustState[managedKey]?.trusted_hash;
+    assert.ok(managedHash);
+    const exactManagedEntry = [
+      `[hooks.state.${JSON.stringify(managedKey)}]`,
+      `trusted_hash = ${JSON.stringify(managedHash)}`,
+    ].join("\n");
+    const tamperedManagedEntry = exactManagedEntry.replace(
+      JSON.stringify(managedHash),
+      JSON.stringify("sha256:tampered-managed-trust"),
+    );
+    assert.throws(
+      () => upsertManagedCodexHookTrustState(
+        configWithRepeatedOuterBanners.replace(exactManagedEntry, tamperedManagedEntry),
+        "/tmp/omx",
+        hooksPath,
+        { managedTrustState },
+      ),
+      (error: unknown) =>
+        error instanceof ManagedCodexHooksPlanError &&
+        error.code === "managed_trust_key_conflict",
+      "a genuinely tampered managed coordinate must remain fail-closed",
+    );
   });
 
   it("preserves managed-looking trust blocks inside multiline TOML values", () => {

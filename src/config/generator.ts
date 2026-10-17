@@ -1921,9 +1921,42 @@ function managedHookTrustStateExpectations(
   return expectations;
 }
 
-function managedHookTrustCoordinateFamily(key: string): string | undefined {
-  const match = /^(.*):([a-z_]+):\d+:\d+$/.exec(key);
-  return match ? `${match[1]}:${match[2]}` : undefined;
+interface ManagedHookTrustCoordinate {
+  family: string;
+  groupIndex: number;
+  handlerIndex: number;
+}
+
+function managedHookTrustCoordinate(key: string): ManagedHookTrustCoordinate | undefined {
+  const match = /^(.*):([a-z_]+):(\d+):(\d+)$/.exec(key);
+  if (!match) return undefined;
+  return {
+    family: `${match[1]}:${match[2]}`,
+    groupIndex: Number(match[3]),
+    handlerIndex: Number(match[4]),
+  };
+}
+
+/** Rejects family fallback for handler coordinates beyond OMX's managed range. */
+function isForeignHookTrustCoordinateBeyondManagedFamily(
+  expectations: ManagedHookTrustStateExpectations,
+  key: string,
+): boolean {
+  const candidate = managedHookTrustCoordinate(key);
+  if (!candidate || expectations.has(key)) return false;
+
+  let maxGroupIndex = -1;
+  let maxHandlerIndex = -1;
+  let hasManagedFamily = false;
+  for (const expectedKey of expectations.keys()) {
+    const expected = managedHookTrustCoordinate(expectedKey);
+    if (expected?.family !== candidate.family) continue;
+    hasManagedFamily = true;
+    maxGroupIndex = Math.max(maxGroupIndex, expected.groupIndex);
+    maxHandlerIndex = Math.max(maxHandlerIndex, expected.handlerIndex);
+  }
+  return hasManagedFamily &&
+    (candidate.groupIndex > maxGroupIndex || candidate.handlerIndex > maxHandlerIndex);
 }
 
 function expectedManagedHookTrustHashes(
@@ -1933,14 +1966,24 @@ function expectedManagedHookTrustHashes(
 ): ReadonlySet<string> | undefined {
   const exact = expectations.get(key);
   if (exact || !allowCoordinateDrift) return exact;
-  const family = managedHookTrustCoordinateFamily(key);
-  if (!family) return undefined;
+  const coordinate = managedHookTrustCoordinate(key);
+  if (!coordinate) return undefined;
   const hashes = new Set<string>();
+  let maxGroupIndex = -1;
+  let maxHandlerIndex = -1;
   for (const [expectedKey, expectedHashes] of expectations) {
-    if (managedHookTrustCoordinateFamily(expectedKey) !== family) continue;
+    const expectedCoordinate = managedHookTrustCoordinate(expectedKey);
+    if (expectedCoordinate?.family !== coordinate.family) continue;
+    maxGroupIndex = Math.max(maxGroupIndex, expectedCoordinate.groupIndex);
+    maxHandlerIndex = Math.max(maxHandlerIndex, expectedCoordinate.handlerIndex);
     for (const hash of expectedHashes) hashes.add(hash);
   }
-  return hashes.size > 0 ? hashes : undefined;
+  if (
+    hashes.size === 0 ||
+    coordinate.groupIndex > maxGroupIndex ||
+    coordinate.handlerIndex > maxHandlerIndex
+  ) return undefined;
+  return hashes;
 }
 
 function tomlHooksStateValue(
@@ -2043,6 +2086,7 @@ function collectMarkerRanges(
       isInsideInertAssignment(start) ||
       source.lines[start]?.trim() !== startMarker
     ) continue;
+    // Repeated start banners are part of the same block; the first end closes it.
     const end = source.lines.findIndex(
       (line, index) =>
         index > start &&
@@ -2050,15 +2094,17 @@ function collectMarkerRanges(
         !isInsideInertAssignment(index) &&
         line.trim() === endMarker,
     );
-    const nestedStart = source.lines.findIndex(
-      (line, index) =>
-        index > start &&
-        source.lineStartsOutsideMultiline[index] &&
-        !isInsideInertAssignment(index) &&
-        line.trim() === startMarker,
-    );
-    if (end === -1 || (nestedStart !== -1 && nestedStart < end)) {
-      if (includeUnterminatedRange) ranges.push({ start, end: source.lines.length });
+    if (end === -1) {
+      const hasRepeatedStartMarker = source.lines.some(
+        (line, index) =>
+          index !== start &&
+          source.lineStartsOutsideMultiline[index] &&
+          !isInsideInertAssignment(index) &&
+          line.trim() === startMarker,
+      );
+      if (includeUnterminatedRange && !hasRepeatedStartMarker) {
+        ranges.push({ start, end: source.lines.length });
+      }
       continue;
     }
     ranges.push({ start, end });
@@ -2614,6 +2660,7 @@ function managedMarkerTrustStateConflicts(
   for (const [key, sourceRepresentations] of representations) {
     for (const representation of sourceRepresentations) {
       if (!isInsideManagedMarkerRange(representation)) continue;
+      if (isForeignHookTrustCoordinateBeyondManagedFamily(expectations, key)) continue;
       const expectedHashes = expectedManagedHookTrustHashes(
         expectations,
         key,
@@ -2630,9 +2677,10 @@ function managedMarkerTrustStateConflicts(
   return conflicts;
 }
 
-function removeEmptyManagedHookTrustStateMarkerBlocks(
+function removeManagedHookTrustStateFences(
   source: TomlSourceLexicalAnalysis,
   removed: Set<number>,
+  preservedForeignTrustSpans: readonly SourceSpan[],
 ): void {
   const { lines } = source;
   for (let start = 0; start < lines.length; start += 1) {
@@ -2646,13 +2694,7 @@ function removeEmptyManagedHookTrustStateMarkerBlocks(
         source.lineStartsOutsideMultiline[index] &&
         line.trim() === OMX_HOOK_TRUST_END_MARKER,
     );
-    const nestedStart = lines.findIndex(
-      (line, index) =>
-        index > start &&
-        source.lineStartsOutsideMultiline[index] &&
-        line.trim() === OMX_HOOK_TRUST_START_MARKER,
-    );
-    if (end === -1 || (nestedStart !== -1 && nestedStart < end)) continue;
+    if (end === -1) continue;
 
     let onlyOwnedMarkerContent = true;
     for (let index = start + 1; index < end; index += 1) {
@@ -2660,15 +2702,19 @@ function removeEmptyManagedHookTrustStateMarkerBlocks(
       if (
         removed.has(index) ||
         trimmed.length === 0 ||
-        trimmed === "# Trusts only setup-managed native hook wrappers."
+        trimmed === OMX_HOOK_TRUST_START_MARKER ||
+        trimmed === "# Trusts only setup-managed native hook wrappers." ||
+        preservedForeignTrustSpans.some((span) => span.start <= index && index < span.end)
       ) continue;
       onlyOwnedMarkerContent = false;
       break;
     }
     if (!onlyOwnedMarkerContent) continue;
 
-    removed.add(start);
     removed.add(end);
+    for (let index = start; index < end; index += 1) {
+      if (lines[index]?.trim() === OMX_HOOK_TRUST_START_MARKER) removed.add(index);
+    }
     for (let index = start + 1; index < end; index += 1) {
       if (lines[index]?.trim() === "# Trusts only setup-managed native hook wrappers.") {
         removed.add(index);
@@ -2765,7 +2811,18 @@ function stripProofManagedCodexHookTrustStateTables(
       removed.add(index);
     }
   }
-  removeEmptyManagedHookTrustStateMarkerBlocks(source, removed);
+  const preservedForeignTrustSpans = [...representations].flatMap(([key, entries]) =>
+    isForeignHookTrustCoordinateBeyondManagedFamily(expectations, key)
+      ? entries
+        .filter((entry) => entry.insideManagedMarkerBlock)
+        .map(({ start, end }) => ({ start, end }))
+      : []
+  );
+  removeManagedHookTrustStateFences(
+    source,
+    removed,
+    preservedForeignTrustSpans,
+  );
   return {
     config: lines.filter((_, index) => !removed.has(index)).join("\n").trimEnd(),
     preservedConflictKeys,
