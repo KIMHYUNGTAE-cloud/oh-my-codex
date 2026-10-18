@@ -126,4 +126,33 @@ describe('checkSparkRouting', () => {
     assert.match(result.message, /non-default model_provider/);
     assert.match(result.message, /my-proxy/);
   });
+
+  it('passes when the Spark-lane agent TOML has no model field and no agentModels override (runtime inheritance)', () => {
+    // This reproduces #3822: since 0.21.18, generator doesn't write model field
+    // for agents without explicit specs; they inherit from config.toml at runtime.
+    // Doctor should accept this as correct, not flag it as stale.
+    writeExploreToml(
+      `name = "explore"\ndescription = "Explore with lightweight synthesis"\n`,
+    );
+    const result = checkSparkRouting(makePaths(workDir));
+    assert.equal(result.status, 'pass', `expected pass but got ${result.status}: ${result.message}`);
+    assert.match(result.message, /wired/);
+    assert.doesNotMatch(result.message, /stale install/);
+  });
+
+  it('warns when the Spark-lane agent TOML has no model field but config has an explicit agentModels override', () => {
+    // Mismatch: override configured but not written to TOML -> stale
+    writeFileSync(join(workDir, '.omx-config.json'), JSON.stringify({
+      agentModels: {
+        explore: 'gpt-5.6-sol-explore',
+      },
+    }));
+    writeExploreToml(
+      `name = "explore"\ndescription = "Explore with lightweight synthesis"\n`,
+    );
+    const result = checkSparkRouting(makePaths(workDir));
+    assert.equal(result.status, 'warn');
+    assert.match(result.message, /stale install/);
+    assert.match(result.message, /gpt-5\.6-sol-explore/);
+  });
 });
