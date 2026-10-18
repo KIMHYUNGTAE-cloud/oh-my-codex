@@ -17,7 +17,6 @@ import {
   getMainDefaultModel,
   getSparkDefaultModel,
   getStandardDefaultModel,
-  getCodexConfigRootModelProvider,
   getCodexConfigEffectiveModelProvider,
   isBuiltinProvider,
   isModelConfiguredAtRoot,
