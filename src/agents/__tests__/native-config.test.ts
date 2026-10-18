@@ -341,6 +341,42 @@ describe("agents/native-config", () => {
     }
   });
 
+  it("does not bake exactModel for planner/architect/researcher when custom provider is configured (fixes #3823)", async () => {
+    const codexHome = join(tmpdir(), `omx-custom-provider-test-${process.pid}`);
+    try {
+      // Create a config.toml with a custom provider
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'model = "glm-5.3-flash"',
+        'model_provider = "custom-provider"',
+      ].join("\n"));
+
+      // With custom provider, planner should NOT bake gpt-6-astra, should inherit from config
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(plannerToml, /^model\s*=/m, "planner should not bake model field with custom provider");
+      // When model is not baked, agents inherit from config.toml at runtime
+      assert.doesNotMatch(plannerToml, /exact gpt-6-astra model/, "planner should not receive exactModel guidance with custom provider");
+
+      // With custom provider, architect should NOT bake gpt-6-astra, should inherit from config
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(architectToml, /^model\s*=/m, "architect should not bake model field with custom provider");
+      assert.doesNotMatch(architectToml, /exact gpt-6-astra model/, "architect should not receive exactModel guidance with custom provider");
+
+      // With custom provider, researcher should NOT bake gpt-6-astra, should inherit from config
+      const researcherToml = generateAgentToml(AGENT_DEFINITIONS.researcher, "researcher prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(researcherToml, /^model\s*=/m, "researcher should not bake model field with custom provider");
+      assert.doesNotMatch(researcherToml, /exact gpt-6-astra model/, "researcher should not receive exactModel guidance with custom provider");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
   it("applies exact-model Terra guidance only for resolved gpt-5.6-terra standard roles", () => {
     const agent: AgentDefinition = {
       name: "debugger",
@@ -734,6 +770,131 @@ describe("agents/native-config", () => {
       // Since model_provider was never written (no per-agent override), it won't be stale
       executorToml = await readFile(join(outDir, "executor.toml"), "utf8");
       assert.doesNotMatch(executorToml, /model_provider\s*=/, "model_provider should still not be present - not stale because never written");
+    } finally {
+      if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
+      else delete process.env.CODEX_HOME;
+      if (typeof previousStandardModel === "string") process.env.OMX_DEFAULT_STANDARD_MODEL = previousStandardModel;
+      else delete process.env.OMX_DEFAULT_STANDARD_MODEL;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not bake exactModel pins for planner/architect/researcher when using custom provider (fixes #3823)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omx-issue-3823-custom-provider-"));
+    const codexHome = join(root, ".codex");
+    const promptsDir = join(root, "prompts");
+    const outDir = join(codexHome, "agents");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousStandardModel = process.env.OMX_DEFAULT_STANDARD_MODEL;
+
+    try {
+      delete process.env.OMX_DEFAULT_STANDARD_MODEL; // Isolate test from env defaults
+      process.env.CODEX_HOME = codexHome;
+      await mkdir(promptsDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+
+      // Test 1: With custom provider, exactModel pins should NOT be baked
+      await writeFile(
+        join(codexHome, "config.toml"),
+        [
+          'model = "glm-5.3-flash"',
+          'model_provider = "custom"',
+          '',
+          '[model_providers.custom]',
+          'name = "Custom Third-Party"',
+          'base_url = "https://custom-provider.com/v1"',
+          'wire_api = "responses"',
+          '',
+        ].join("\n"),
+      );
+      await writeFile(join(promptsDir, "planner.md"), "planner prompt");
+      await writeFile(join(promptsDir, "architect.md"), "architect prompt");
+      await writeFile(join(promptsDir, "researcher.md"), "researcher prompt");
+
+      await installNativeAgentConfigs(root, {
+        agentsDir: outDir,
+        catalogManifest: manifestWithAgents(["planner", "architect", "researcher"]),
+      });
+
+      // Planner should NOT have model baked, inherits from config.toml
+      let plannerToml = await readFile(join(outDir, "planner.toml"), "utf8");
+      assert.doesNotMatch(
+        plannerToml,
+        /^model\s*=/m,
+        "planner should not bake model when using custom provider",
+      );
+      assert.match(
+        plannerToml,
+        /resolved_model: glm-5\.3-flash/,
+        "planner should resolve to custom provider model from config",
+      );
+
+      // Architect should NOT have model baked, inherits from config.toml
+      let architectToml = await readFile(join(outDir, "architect.toml"), "utf8");
+      assert.doesNotMatch(
+        architectToml,
+        /^model\s*=/m,
+        "architect should not bake model when using custom provider",
+      );
+      assert.match(
+        architectToml,
+        /resolved_model: glm-5\.3-flash/,
+        "architect should resolve to custom provider model from config",
+      );
+
+      // Researcher should NOT have model baked, inherits from config.toml
+      let researcherToml = await readFile(join(outDir, "researcher.toml"), "utf8");
+      assert.doesNotMatch(
+        researcherToml,
+        /^model\s*=/m,
+        "researcher should not bake model when using custom provider",
+      );
+      assert.match(
+        researcherToml,
+        /resolved_model: glm-5\.3-flash/,
+        "researcher should resolve to custom provider model from config",
+      );
+
+      // Test 2: With default provider, exactModel pins SHOULD be baked
+      await rm(outDir, { recursive: true, force: true });
+      await writeFile(
+        join(codexHome, "config.toml"),
+        'model = "gpt-5.6-sol"\n', // No model_provider = default OpenAI
+      );
+
+      await installNativeAgentConfigs(root, {
+        agentsDir: outDir,
+        catalogManifest: manifestWithAgents(["planner", "architect", "researcher"]),
+      });
+
+      // Planner SHOULD have exactModel baked with default provider
+      plannerToml = await readFile(join(outDir, "planner.toml"), "utf8");
+      assert.match(
+        plannerToml,
+        /model = "gpt-6-astra"/,
+        "planner should bake exactModel when using default provider",
+      );
+      assert.match(
+        plannerToml,
+        /resolved_model: gpt-6-astra/,
+        "planner should resolve to gpt-6-astra with default provider",
+      );
+
+      // Architect SHOULD have exactModel baked with default provider
+      architectToml = await readFile(join(outDir, "architect.toml"), "utf8");
+      assert.match(
+        architectToml,
+        /model = "gpt-6-astra"/,
+        "architect should bake exactModel when using default provider",
+      );
+
+      // Researcher SHOULD have exactModel baked with default provider
+      researcherToml = await readFile(join(outDir, "researcher.toml"), "utf8");
+      assert.match(
+        researcherToml,
+        /model = "gpt-6-astra"/,
+        "researcher should bake exactModel when using default provider",
+      );
     } finally {
       if (typeof previousCodexHome === "string") process.env.CODEX_HOME = previousCodexHome;
       else delete process.env.CODEX_HOME;
