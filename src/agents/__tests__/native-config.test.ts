@@ -903,4 +903,105 @@ describe("agents/native-config", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("resolves profile-selected custom provider and skips exactModel pins (P1 fix for #3824)", async () => {
+    const codexHome = join(tmpdir(), `omx-profile-provider-test-${process.pid}`);
+    try {
+      // Create a config.toml with a profile-selected custom provider
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'profile = "custom-lane"',
+        '',
+        '[profiles.custom-lane]',
+        'model_provider = "profile-custom-provider"',
+        'model = "llm-5.0-custom"',
+      ].join("\n"));
+
+      // With profile-selected custom provider, planner should NOT bake exactModel
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(plannerToml, /^model\s*=/m, "planner should not bake model when custom provider is in active profile");
+      assert.doesNotMatch(plannerToml, /exact gpt-6-astra model/, "planner should not receive astra guidance when custom provider is in active profile");
+
+      // With profile-selected custom provider, architect should NOT bake exactModel
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(architectToml, /^model\s*=/m, "architect should not bake model when custom provider is in active profile");
+      assert.doesNotMatch(architectToml, /exact gpt-6-astra model/, "architect should not receive astra guidance when custom provider is in active profile");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves exactModel pins for built-in openai-chatgpt provider (P2.1 fix for #3824)", async () => {
+    const codexHome = join(tmpdir(), `omx-builtin-provider-test-${process.pid}`);
+    const origCodexHome = process.env.CODEX_HOME;
+    try {
+      // Create config with built-in openai-chatgpt provider
+      // This would normally be set by omx auth add
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'model = "gpt-6-astra"',
+        'model_provider = "openai-chatgpt"',
+      ].join("\n"));
+
+      // With built-in openai-chatgpt provider, planner SHOULD bake exactModel
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(plannerToml, /model = "gpt-6-astra"/, "planner should bake exactModel with openai-chatgpt provider");
+      assert.match(plannerToml, /exact gpt-6-astra model/, "planner should receive astra guidance with openai-chatgpt provider");
+
+      // With built-in openai-chatgpt provider, architect SHOULD bake exactModel
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(architectToml, /model = "gpt-6-astra"/, "architect should bake exactModel with openai-chatgpt provider");
+      assert.match(architectToml, /exact gpt-6-astra model/, "architect should receive astra guidance with openai-chatgpt provider");
+    } finally {
+      if (typeof origCodexHome === "string") {
+        process.env.CODEX_HOME = origCodexHome;
+      } else {
+        delete process.env.CODEX_HOME;
+      }
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses astra guidance for custom provider without root model (P2.2 fix for #3824)", async () => {
+    const codexHome = join(tmpdir(), `omx-custom-no-model-test-${process.pid}`);
+    try {
+      // Create a config.toml with a custom provider but no root model
+      // This is the configuration shape from tmux-session.test.ts:3683-3692
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'model_provider = "custom_provider"',
+        '',
+        '[model_providers.custom_provider]',
+        'name = "custom_provider"',
+        'base_url = "http://localhost:3000/v1"',
+        'wire_api = "responses"',
+        'requires_openai_auth = true',
+        'env_key = "CUSTOM_PROVIDER_API_KEY"',
+      ].join("\n"));
+
+      // With custom provider and no root model, planner should NOT emit astra guidance
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(plannerToml, /^model\s*=/m, "planner should not bake model field with custom provider and no root model");
+      assert.doesNotMatch(plannerToml, /exact gpt-6-astra model/, "planner should not emit astra guidance with custom provider and no root model");
+
+      // With custom provider and no root model, architect should NOT emit astra guidance
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(architectToml, /^model\s*=/m, "architect should not bake model field with custom provider and no root model");
+      assert.doesNotMatch(architectToml, /exact gpt-6-astra model/, "architect should not emit astra guidance with custom provider and no root model");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
 });
