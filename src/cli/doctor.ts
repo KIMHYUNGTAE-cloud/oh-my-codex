@@ -4056,13 +4056,22 @@ export function checkSparkRouting(paths: DoctorPaths): Check {
 			);
 			continue;
 		}
+		const explicitOverride = explicitSparkAgentOverrides.get(agentName);
 		if (!info.model) {
+			// No model field in TOML: check if it's intentional runtime inheritance or stale
+			if (!explicitOverride) {
+				// No override configured -> agent will inherit from config.toml at runtime (intended behavior since 0.21.18)
+				wired.push(
+					`${agentName} -> \`${sparkModel}\` (runtime inheritance)${info.modelProvider ? ` (provider: ${info.modelProvider})` : ""}`,
+				);
+				continue;
+			}
+			// Explicit override configured but TOML has no model field -> stale
 			problems.push(
-				`${agentName}.toml has no model field (stale install; run \`omx setup --force\`)`,
+				`${agentName}.toml has no model field but agentModels.${agentName} explicitly resolves to \`${explicitOverride}\` (stale install; run \`omx setup --force\`)`,
 			);
 			continue;
 		}
-		const explicitOverride = explicitSparkAgentOverrides.get(agentName);
 		if (explicitOverride) {
 			if (info.model !== explicitOverride) {
 				problems.push(
