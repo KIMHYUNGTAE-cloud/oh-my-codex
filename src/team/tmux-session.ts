@@ -3612,6 +3612,11 @@ export function waitForWorkerReady(
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
 
+  // Always perform a final check before the deadline to catch incompatibility markers
+  // that may appear on the second capture (finding #4309679342)
+  if (check()) return true;
+  if (blockedByTrustPrompt) return false;
+
   return false;
 }
 
@@ -3711,6 +3716,12 @@ export async function waitForWorkerReadyDetailedAsync(
     await sleep(Math.max(0, Math.min(delayMs, remaining)));
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
+
+  // Always perform a final check before the deadline to catch incompatibility markers
+  // that may appear on the second capture (finding #4309679342)
+  if (await check()) return true;
+  if (startupIncompatible) return false;
+  if (blockedByTrustPrompt) return false;
 
   return false;
 }
