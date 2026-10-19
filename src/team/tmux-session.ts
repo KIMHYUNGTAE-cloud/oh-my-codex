@@ -3602,7 +3602,12 @@ export function waitForWorkerReady(
   const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
-    if (check()) return true;
+    if (check()) {
+      // Poll returned true (ready). Verify we're still within deadline.
+      const checkElapsed = Date.now() - startedAt;
+      if (checkElapsed <= timeoutMs) return true;
+      // Exceeded deadline during the poll; don't report success.
+    }
     if (blockedByTrustPrompt) return false;
     // After dismissing a trust prompt, reset backoff so we re-check quickly
     // instead of sleeping 2s/4s/8s while the worker is starting up.
@@ -3718,7 +3723,12 @@ export async function waitForWorkerReadyDetailedAsync(
   const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
-    if (await check()) return true;
+    if (await check()) {
+      // Poll returned true (ready). Verify we're still within deadline.
+      const checkElapsed = Date.now() - startedAt;
+      if (checkElapsed <= timeoutMs) return true;
+      // Exceeded deadline during the poll; don't report success.
+    }
     if (startupIncompatible) return false;
     if (blockedByTrustPrompt) return false;
     // After dismissing a trust prompt, reset backoff so we re-check quickly
