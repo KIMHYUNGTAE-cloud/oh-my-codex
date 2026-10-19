@@ -1073,8 +1073,9 @@ export function buildTeamExecutionPlan(
     // CLI subjects are truncated for display; descriptions retain the full request.
     const { codeChangeRequested, analysisOnly } = inferTaskEvidenceIntent(st.description);
     const implicitAnalysis = !explicitAgentType && analysisOnly;
+    const isExplicitAnalysisRole = explicitAgentType && (getAgent(role)?.tools ?? 'execution') !== 'execution';
     return { ...st, role, requires_code_change: !explicitAgentType && st.requires_code_change !== undefined
-      ? st.requires_code_change : (!explicitAgentType && codeChangeRequested) || (!implicitAnalysis && (getAgent(role)?.tools ?? 'execution') === 'execution') };
+      ? st.requires_code_change : isExplicitAnalysisRole ? false : (!explicitAgentType && codeChangeRequested) || (!implicitAnalysis && (getAgent(role)?.tools ?? 'execution') === 'execution') };
   };
 
   let subtasks = plan.subtasks;

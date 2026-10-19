@@ -1,6 +1,6 @@
 const COURTESY_PREFIX = /^(?:(?:please|can you|could you|would you|help me|only|just)\s+)*/i;
 const EXPLANATION_PREFIX = /^(?:explain|describe|what|why|how|where|which|when|who)\b/i;
-const MUTATION_PREFIX = /^(?:add(?:ing)?|apply(?:ing)?|adjust(?:ing)?|build(?:ing)?|chang(?:e|ing)|convert(?:ing)?|correct(?:ing)?|creat(?:e|ing)|delet(?:e|ing)|edit(?:ing)?|enhanc(?:e|ing)|extend(?:ing)?|fix(?:ing)?|implement(?:ing)?|improv(?:e|ing)|integrat(?:e|ing)|mak(?:e|ing)|migrat(?:e|ing)|modify(?:ing)?|optimi[sz](?:e|ing)|patch(?:ing)?|port(?:ing)?|refactor(?:ing)?|remov(?:e|ing)|renam(?:e|ing)|repair(?:ing)?|replac(?:e|ing)|resolv(?:e|ing)|rewrit(?:e|ing)|ship(?:ping)?|simplify(?:ing)?|support(?:ing)?|touch(?:ing)?|tun(?:e|ing)|updat(?:e|ing)|upgrad(?:e|ing)|wir(?:e|ing)|writ(?:e|ing))\b/i;
+const MUTATION_PREFIX = /^(?:add(?:ing)?|apply(?:ing)?|adjust(?:ing)?|build(?:ing)?|chang(?:e|ing)|convert(?:ing)?|correct(?:ing)?|creat(?:e|ing)|delet(?:e|ing)|edit(?:ing)?|enhanc(?:e|ing)|extend(?:ing)?|fix(?:ing)?|implement(?:ing)?|improv(?:e|ing)|integrat(?:e|ing)|mak(?:e|ing)|migrat(?:e|ing)|modify(?:ing)?|optimi[sz](?:e|ing)|patch(?:ing)?|port(?:ing)?|refactor(?:ing)?|remov(?:e|ing)|renam(?:e|ing)|repair(?:ing)?|replac(?:e|ing)?|resolv(?:e|ing)|rewrit(?:e|ing)|ship(?:ping)?|simplify(?:ing)?|support(?:ing)?|touch(?:ing)?|tun(?:e|ing)|updat(?:e|ing)|upgrad(?:e|ing)|wir(?:e|ing)|writ(?:e|ing))/i;
 const LOCALIZED_MUTATION = /(?:구현|추가|수정|업데이트|지원|해결)(?!(?:하는|할|한|된)?\s*(?:방법|여부|이력|내역|계획|없이|안\s)|하지\s*(?:말|않))(?=$|[\s.!?]|해|하)/;
 const NO_CHANGE_PREFIX = /^(?:do\s+not|don't|never)\s+/i;
 const ANALYSIS_PREFIX = /^(?:analy(?:se|ze)|audit|assess|evaluate|explore|investigate|research|review|study|explain|describe|compare|outline|what|why|how|where|which|when|who|summari(?:s|z)e)\b/i;
@@ -16,7 +16,8 @@ function normalizeClause(text: string): string {
 }
 
 function evaluatesOptions(text: string): boolean {
-  return ANALYSIS_PREFIX.test(text) && /\b(?:options?|alternatives?|candidates?|choices?|approaches?)\s*:/i.test(text);
+  // Detect option lists - these are analytical and should preserve intent even with imperative-looking items
+  return ANALYSIS_PREFIX.test(text) && /\b(?:options?|alternatives?|candidates?|choices?|approaches?)\s*(?:\n|,|:|or)\b/i.test(text);
 }
 
 function splitCommands(text: string, optionList = false): string[] {
@@ -33,9 +34,19 @@ function describesActions(text: string): boolean {
   if (/^(?:what|why|how|where|which|when|who)\b/i.test(text)) return true;
   if (evaluatesOptions(text)) return true;
   if (ANALYSIS_PREFIX.test(text) && /\b(?:how|whether)\s+to\b/i.test(text)) return true;
-  return EXPLANATION_PREFIX.test(text)
-    && [...text.matchAll(/\b(?:to|of|about|before|after|while)\s+/gi)]
-      .some(match => MUTATION_PREFIX.test(text.slice(match.index! + match[0].length)));
+  // Check for explanatory text with embedded mutation actions in subordinate clauses
+  if (EXPLANATION_PREFIX.test(text)) {
+    // Look for mutation verbs in purpose, temporal, or conditional positions
+    const matches = [...text.matchAll(/\b(?:to|of|about|before|after|while)\s+/gi)];
+    for (const match of matches) {
+      const afterPrep = text.slice(match.index! + match[0].length);
+      // Check if the text after preposition starts with or contains a mutation action
+      if (MUTATION_PREFIX.test(afterPrep)) return true;
+      // Also check for inflected forms like "implementing" that might not match MUTATION_PREFIX
+      if (/^(?:implementing|repairing|applying)\b/i.test(afterPrep)) return true;
+    }
+  }
+  return false;
 }
 
 function namesOutputFile(clause: string): boolean {
@@ -45,20 +56,26 @@ function namesOutputFile(clause: string): boolean {
       const explicitFile = Boolean(file);
       const context = clause.slice(0, match.index);
       const noFileChanges = /\bwithout\s+(?:changing|modifying|editing|touching)\s+(?:(?:any|the)\s+)?files?\b/i.test(clause);
-      const sourceContext = noFileChanges ? context : context.split(/\bfor\b/i).at(-1) ?? '';
+      // Audience prepositions (for, about) do not exclude file paths
+      const beforeMatch = context.split(/\b(?:for|about)\b/i).at(-1) ?? '';
+      const sourceContext = noFileChanges ? context : beforeMatch;
       if ((!explicitFile || noFileChanges) && /^(?:in|at)$/i.test(preposition)
-        && (/\b(?:about|on)\b/i.test(sourceContext)
+        && (/\b(?:on)\b/i.test(sourceContext)
           || ((noFileChanges || !/\bfor\b/i.test(context)) && /\bof\b/i.test(context)))) return false;
       const quoted = doubleQuoted ?? singleQuoted ?? backtickQuoted;
       const path = quoted === undefined ? token ?? '' : Buffer.from(quoted, 'hex').toString('utf8');
-      return explicitFile || (!/^[a-z]+:\/\//i.test(path) && (/[\\/]/.test(path)
+      return explicitFile || (!/^[a-z]+:\/\//i.test(path) && (/[\\\/]/.test(path)
         || /\.[a-z\d]+[.!?]?$/i.test(path) || /^(?:README|LICENSE|COPYING|NOTICE|CHANGELOG|AUTHORS|CONTRIBUTING|Dockerfile|Makefile)[.!?]?$/i.test(path)));
     });
 }
 
 function isAnalysisDeliverable(clause: string): boolean {
-  return !namesOutputFile(clause) && /^(?:add|build|create|edit|improve|make|update|write)\b/i.test(clause)
-    && /(?:^|\s)(?:reports?|summar(?:y|ies)|findings|recommendations)[.!?]?\s*$/i.test(clause.split(/\b(?:with|without|of|on|about|for|in|to|that)\b/i)[0]);
+  // Analysis deliverables don't have named output files and only ask for reports/summaries
+  if (namesOutputFile(clause)) return false;
+  if (!/^(?:add|build|create|edit|improve|make|update|write)\b/i.test(clause)) return false;
+  // Check if it's a report-like deliverable, excluding audience prepositions from context splits
+  const beforeAudience = clause.split(/\b(?:with|without|of|on|about|for|in|to|that)\b/i)[0];
+  return /(?:^|\s)(?:reports?|summar(?:y|ies)|findings|recommendations)[.!?]?\s*$/i.test(beforeAudience);
 }
 
 export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeRequested: boolean; analysisOnly: boolean } {
@@ -79,7 +96,13 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
           nextItem += 1;
           return item.slice(0, -1) + ')';
         });
-        return splitCommands(prose, evaluatesOptions(text)).slice(1)
+        const commands = splitCommands(prose, evaluatesOptions(text));
+        // For analysis lists, preserve the item; for mixed content, extract any subordinate coding commands
+        if (evaluatesOptions(text) || /^(?:explain|describe|what|why|how|where|which|when|who)\b/i.test(text)) {
+          return prose; // Preserve analysis list items
+        }
+        // For other cases, extract subordinate commands after the first clause
+        return commands.slice(1)
           .filter(part => !/^\s*(?:and\s+)?(?:[-*•]|\d+[.)])\s+/.test(part)).join('\n');
       });
   });
@@ -89,23 +112,32 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
       const normalized = normalizeClause(sentence);
       const parts = EXPLANATION_PREFIX.test(normalized) ? [normalized]
         : normalized.split(/\b(?:before|after|while|in order to|so as to|then|also)\s+/i);
-      return parts.flatMap(part => describesActions(part.trim()) ? [part] : part.split(/,|:(?![\\/])|\b(?:and|then|also)\b/i));
+      return parts.flatMap(part => {
+        const trimmed = part.trim();
+        // Don't split analytical contexts or described actions
+        if (describesActions(trimmed)) return [part];
+        // For non-analytical parts, split on connectors and punctuation
+        return trimmed.split(/,|:(?![\\\/])|\b(?:and|then|also)\b/i);
+      });
     })
     .flatMap(part => {
       const clause = normalizeClause(part.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ''));
-      if (EXPLANATION_PREFIX.test(clause) || describesActions(clause)) return [clause];
+      // After normalization, recheck analysis intent and action descriptions
+      if (ANALYSIS_PREFIX.test(clause) || describesActions(clause)) return [clause];
+      if (NO_CHANGE_PREFIX.test(clause)) return [clause];
       // Keep explanatory and negative context when exposing subordinate actions.
-      const actions = [...clause.matchAll(/\bto\s+/gi)]
+      const actions = [...clause.matchAll(/\b(?:to|before|after|while)\s+/gi)]
         .filter(match => !/\b(?:how|not|ways?)\s+$/i.test(clause.slice(0, match.index))
           && !/\b(?:without|not)\b[^,;.!?\r\n]*$/i.test(clause.slice(0, match.index)))
         .map(match => clause.slice(match.index! + match[0].length).trim().replace(COURTESY_PREFIX, ''));
       return [clause, ...actions];
     });
-  const codeChangeRequested = clauses.some(clause => !EXPLANATION_PREFIX.test(clause) && !describesActions(clause) && !isAnalysisDeliverable(clause)
+  const codeChangeRequested = clauses.some(clause => !EXPLANATION_PREFIX.test(clause) && !NO_CHANGE_PREFIX.test(clause) && !describesActions(clause) && !isAnalysisDeliverable(clause)
     && (MUTATION_PREFIX.test(clause) || LOCALIZED_MUTATION.test(clause)
       || (/^(?:sav(?:e|ing)|persist(?:ing)?|record(?:ing)?|stor(?:e|ing)|export(?:ing)?|append(?:ing)?)\b/i.test(clause) && namesOutputFile(clause))));
+  const explicitNoChange = clauses.some(clause => NO_CHANGE_PREFIX.test(clause));
   return {
     codeChangeRequested,
-    analysisOnly: !codeChangeRequested && (texts.some(text => ANALYSIS_PREFIX.test(text)) || clauses.some(clause => ANALYSIS_PREFIX.test(clause) || (NO_CHANGE_PREFIX.test(clause) && MUTATION_PREFIX.test(clause.replace(NO_CHANGE_PREFIX, ''))) || isAnalysisDeliverable(clause))),
+    analysisOnly: !codeChangeRequested && (explicitNoChange || texts.some(text => ANALYSIS_PREFIX.test(text)) || clauses.some(clause => ANALYSIS_PREFIX.test(clause) || (NO_CHANGE_PREFIX.test(clause) && MUTATION_PREFIX.test(clause.replace(NO_CHANGE_PREFIX, ''))) || isAnalysisDeliverable(clause))),
   };
 }
