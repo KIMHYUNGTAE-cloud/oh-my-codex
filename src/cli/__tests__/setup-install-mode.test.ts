@@ -2845,27 +2845,28 @@ describe("omx setup install mode behavior", () => {
 							const shim = Buffer.from(
 								buildManagedCodexNativeHookWindowsShimContent(packageRoot),
 								"utf-8",
-							);
-							await mkdir(dirname(metadataPath), { recursive: true });
-							await writeFile(configPath, config);
-							await writeFile(hooksPath, hooks);
-							await writeFile(shimPath, shim);
-							await writeFile(metadataPath, metadata);
+						);
+						await mkdir(dirname(metadataPath), { recursive: true });
+						await mkdir(dirname(shimPath), { recursive: true });
+						await writeFile(configPath, config);
+						await writeFile(hooksPath, hooks);
+						await writeFile(shimPath, shim);
+						await writeFile(metadataPath, metadata);
 
-							await assert.rejects(
-								setup({
-									scope: "user",
-									installMode: "plugin",
-									pluginAgentsMdPrompt: async () => false,
-									codexFeaturesProbe: () =>
-										"hooks stable true\nplugin_hooks experimental true\n",
-								}),
-								(error: unknown) =>
-									typeof error === "object" &&
-									error !== null &&
-									"code" in error &&
-									(error as { code?: unknown }).code === "managed_trust_key_conflict",
-							);
+					await assert.rejects(
+						setup({
+							scope: "user",
+							installMode: "plugin",
+							pluginAgentsMdPrompt: async () => false,
+							codexFeaturesProbe: () =>
+								"hooks stable true\nplugin_hooks experimental true\n",
+						}),
+						(error: unknown) =>
+							typeof error === "object" &&
+							error !== null &&
+							"code" in error &&
+							(error as { code?: unknown }).code === "managed_trust_key_conflict",
+					);
 							assert.deepEqual(await readFile(configPath), Buffer.from(config, "utf-8"));
 							assert.deepEqual(await readFile(hooksPath), Buffer.from(hooks, "utf-8"));
 							assert.deepEqual(await readFile(shimPath), shim);
@@ -2932,6 +2933,7 @@ describe("omx setup install mode behavior", () => {
 							);
 							const metadata = Buffer.from('{"managedBy":"foreign"}\n', "utf-8");
 							await mkdir(dirname(metadataPath), { recursive: true });
+							await mkdir(dirname(shimPath), { recursive: true });
 							await writeFile(configPath, config);
 							if (fixture.hooks !== null) await writeFile(hooksPath, fixture.hooks);
 							await writeFile(shimPath, shim);
@@ -3137,6 +3139,7 @@ describe("omx setup install mode behavior", () => {
 								`# concurrent ${mutationKind} shim replacement\n`,
 								"utf-8",
 							);
+							await mkdir(dirname(shimPath), { recursive: true });
 							await writeFile(hooksPath, hooksBefore);
 							await writeFile(
 								shimPath,
@@ -3209,6 +3212,7 @@ describe("omx setup install mode behavior", () => {
 						"utf-8",
 					);
 					const foreignShim = Buffer.from("# concurrent finalization shim replacement\n", "utf-8");
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(hooksPath, hooksBefore);
 					await writeFile(
 						shimPath,
@@ -3280,6 +3284,7 @@ describe("omx setup install mode behavior", () => {
 					codexFeaturesProbe: () =>
 						"hooks stable true\nplugin_hooks experimental true\n",
 				});
+				await mkdir(dirname(shimPath), { recursive: true });
 				await writeFile(hooksPath, futureHooks);
 				await writeFile(
 					shimPath,
@@ -3324,6 +3329,7 @@ describe("omx setup install mode behavior", () => {
 				await withTempCwd(wd, async () => {
 					const hooksPath = join(codexHomeDir, "hooks.json");
 					const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexHomeDir);
+					const shimPathWindows = buildManagedCodexNativeHookWindowsShimPath(codexHomeDir);
 					const managed = buildManagedCodexHooksConfig(packageRoot, {
 						platform: "win32",
 						codexHomeDir,
@@ -3342,9 +3348,10 @@ describe("omx setup install mode behavior", () => {
 					).replace(
 						JSON.stringify(sentinel),
 						JSON.stringify(
-							`& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimPath}'`,
-						).replace(/\\\\/g, "\\u005c"),
+							`& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimPathWindows}'`,
+						).replace(/\\\\\\\\/g, "\\u005c"),
 					) + "\n";
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(hooksPath, futureHooks);
 					await writeFile(
 						shimPath,
@@ -3388,6 +3395,7 @@ describe("omx setup install mode behavior", () => {
 						platform: "win32",
 						codexHomeDir,
 					});
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						hooksPath,
 						JSON.stringify({
@@ -3437,6 +3445,7 @@ describe("omx setup install mode behavior", () => {
 						platform: "win32",
 						codexHomeDir,
 					});
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						hooksPath,
 						JSON.stringify({
@@ -3487,6 +3496,7 @@ describe("omx setup install mode behavior", () => {
 						platform: "win32",
 						codexHomeDir,
 					});
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						hooksPath,
 						JSON.stringify(
@@ -4887,6 +4897,7 @@ describe("omx setup install mode behavior", () => {
 				await withTempCwd(wd, async () => {
 					const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexHomeDir);
 					const modifiedShim = "# modified by user\n";
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(shimPath, modifiedShim);
 
 					await assert.rejects(

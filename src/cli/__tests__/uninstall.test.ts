@@ -760,6 +760,7 @@ describe('omx uninstall', () => {
             'utf-8',
           );
           await mkdir(dirname(metadataPath), { recursive: true });
+          await mkdir(dirname(shimPath), { recursive: true });
           await writeFile(configPath, config);
           await writeFile(hooksPath, hooks);
           await writeFile(shimPath, shim);
@@ -822,6 +823,7 @@ describe('omx uninstall', () => {
           );
           const metadata = Buffer.from('{"managedBy":"foreign"}\n', 'utf-8');
           await mkdir(dirname(metadataPath), { recursive: true });
+          await mkdir(dirname(shimPath), { recursive: true });
           await writeFile(configPath, config);
           if (fixture.hooks !== null) await writeFile(hooksPath, fixture.hooks);
           await writeFile(shimPath, shim);
@@ -883,6 +885,7 @@ describe('omx uninstall', () => {
           ).replace(/\\\\/g, '\\u005c'),
         ) + '\n';
         await mkdir(codexDir, { recursive: true });
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
         await writeFile(hooksPath, hooks);
         await writeFile(
@@ -925,6 +928,7 @@ describe('omx uninstall', () => {
             }],
           },
         }, null, 2)}\n`;
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
         await writeFile(hooksPath, hooks);
         await writeFile(
@@ -973,6 +977,7 @@ describe('omx uninstall', () => {
           },
         }, null, 2)}\n`;
         await mkdir(codexDir, { recursive: true });
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
         await writeFile(hooksPath, hooks);
         await writeFile(
@@ -1082,6 +1087,7 @@ describe('omx uninstall', () => {
           );
           const replacement = Buffer.from('concurrent shim replacement\n', 'utf-8');
           await mkdir(codexDir, { recursive: true });
+          await mkdir(dirname(shimPath), { recursive: true });
           await writeFile(configPath, config);
           await writeFile(hooksPath, hooks);
           await writeFile(shimPath, shim);
@@ -1136,6 +1142,7 @@ describe('omx uninstall', () => {
         const config = buildOmxConfig();
         const replacement = Buffer.from('concurrent preserved shim replacement\n', 'utf-8');
         await mkdir(codexDir, { recursive: true });
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, config);
         await writeFile(hooksPath, hooks);
         await writeFile(
@@ -1188,6 +1195,7 @@ describe('omx uninstall', () => {
         const config = buildOmxConfig();
         const replacement = Buffer.from('concurrent finalization shim replacement\n', 'utf-8');
         await mkdir(codexDir, { recursive: true });
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, config);
         await writeFile(hooksPath, hooks);
         await writeFile(
