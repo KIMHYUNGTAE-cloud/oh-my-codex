@@ -3628,7 +3628,10 @@ export async function waitForWorkerReadyDetailedAsync(
   hudPaneId?: string,
   incompatibility?: { workerCli?: TeamWorkerCli; finalArgs?: readonly string[]; onIncompatible: (reason: typeof CODEX_BYPASS_MDM_INCOMPATIBLE_REASON) => void },
 ): Promise<boolean> {
-  const initialBackoffMs = 150;
+  // Adaptive backoff: for very short timeouts (e.g., during tests), use a proportionally short backoff
+  // to allow multiple polling attempts. This ensures that incompatibility markers like MDM rejection
+  // can be detected even when the timeout is short.
+  const initialBackoffMs = Math.max(25, Math.min(150, timeoutMs / 2));
   const maxBackoffMs = 8000;
   const startedAt = Date.now();
   let blockedByTrustPrompt = false;
