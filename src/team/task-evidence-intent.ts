@@ -1,6 +1,6 @@
 const COURTESY_PREFIX = /^(?:(?:please|can you|could you|would you|help me|only|just)\s+)*/i;
 const EXPLANATION_PREFIX = /^(?:explain|describe|what|why|how|where|which|when|who)\b/i;
-const MUTATION_PREFIX = /^(?:add(?:ing)?|apply(?:ing)?|adjust(?:ing)?|build(?:ing)?|chang(?:e|ing)|convert(?:ing)?|correct(?:ing)?|creat(?:e|ing)|delet(?:e|ing)|edit(?:ing)?|enhanc(?:e|ing)|extend(?:ing)?|fix(?:ing)?|implement(?:ing)?|improv(?:e|ing)|integrat(?:e|ing)|mak(?:e|ing)|migrat(?:e|ing)|modify(?:ing)?|optimi[sz](?:e|ing)|patch(?:ing)?|port(?:ing)?|refactor(?:ing)?|remov(?:e|ing)|renam(?:e|ing)|repair(?:ing)?|replac(?:e|ing)?|resolv(?:e|ing)|rewrit(?:e|ing)|ship(?:ping)?|simplify(?:ing)?|support(?:ing)?|touch(?:ing)?|tun(?:e|ing)|updat(?:e|ing)|upgrad(?:e|ing)|wir(?:e|ing)|writ(?:e|ing))/i;
+const MUTATION_PREFIX = /^(?:add(?:ing)?|apply(?:ing)?|adjust(?:ing)?|build(?:ing)?|chang(?:e|ing)|convert(?:ing)?|correct(?:ing)?|creat(?:e|ing)|delet(?:e|ing)|edit(?:ing)?|enhanc(?:e|ing)|extend(?:ing)?|fix(?:ing)?|implement(?:ing)?|improv(?:e|ing)|integrat(?:e|ing)|mak(?:e|ing)|migrat(?:e|ing)|modify(?:ing)?|optimi[sz](?:e|ing)|patch(?:ing)?|port(?:ing)?|refactor(?:ing)?|remov(?:e|ing)|renam(?:e|ing)|repair(?:ing)?|replac(?:e|ing)|resolv(?:e|ing)|rewrit(?:e|ing)|ship(?:ping)?|simplify(?:ing)?|support(?:ing)?|touch(?:ing)?|tun(?:e|ing)|updat(?:e|ing)|upgrad(?:e|ing)|wir(?:e|ing)|writ(?:e|ing))\b/i;
 const LOCALIZED_MUTATION = /(?:구현|추가|수정|업데이트|지원|해결)(?!(?:하는|할|한|된)?\s*(?:방법|여부|이력|내역|계획|없이|안\s)|하지\s*(?:말|않))(?=$|[\s.!?]|해|하)/;
 const NO_CHANGE_PREFIX = /^(?:do\s+not|don't|never)\s+/i;
 const ANALYSIS_PREFIX = /^(?:analy(?:se|ze)|audit|assess|evaluate|explore|investigate|research|review|study|explain|describe|compare|outline|what|why|how|where|which|when|who|summari(?:s|z)e)\b/i;
@@ -56,12 +56,14 @@ function namesOutputFile(clause: string): boolean {
       const explicitFile = Boolean(file);
       const context = clause.slice(0, match.index);
       const noFileChanges = /\bwithout\s+(?:changing|modifying|editing|touching)\s+(?:(?:any|the)\s+)?files?\b/i.test(clause);
+      // When explicitly excluding file changes, never count mentioned paths as output files
+      if (noFileChanges) return false;
       // Audience prepositions (for, about) do not exclude file paths
       const beforeMatch = context.split(/\b(?:for|about)\b/i).at(-1) ?? '';
-      const sourceContext = noFileChanges ? context : beforeMatch;
-      if ((!explicitFile || noFileChanges) && /^(?:in|at)$/i.test(preposition)
-        && (/\b(?:on)\b/i.test(sourceContext)
-          || ((noFileChanges || !/\bfor\b/i.test(context)) && /\bof\b/i.test(context)))) return false;
+      const sourceContext = beforeMatch;
+      if (!explicitFile && /^(?:in|at)$/i.test(preposition)
+        && (/\b(?:on|about)\b/i.test(sourceContext)
+          || (!/\bfor\b/i.test(context) && /\bof\b/i.test(context)))) return false;
       const quoted = doubleQuoted ?? singleQuoted ?? backtickQuoted;
       const path = quoted === undefined ? token ?? '' : Buffer.from(quoted, 'hex').toString('utf8');
       return explicitFile || (!/^[a-z]+:\/\//i.test(path) && (/[\\\/]/.test(path)
@@ -87,7 +89,9 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
     const list = /:\s*(?:\r?\n\s*)?(?:[-*•]|\d+[.)])\s+/.exec(text);
     if ((!EXPLANATION_PREFIX.test(text) && !evaluatesOptions(text)) || !list) return text;
     // Listed steps are the explanation's object; a later unlisted command remains visible.
-    return text.slice(0, list.index) + '\n' + text.slice(list.index + 1)
+    const isAnalysisList = evaluatesOptions(text) || /^(?:explain|describe|what|why|how|where|which|when|who)\b/i.test(text);
+    const listItems: string[] = [];
+    const replacedText = text.slice(list.index + 1)
       .replace(/(?:^|\r?\n)\s*([-*•]|\d+[.)])\s+([^\r\n]*)/g, (_line, marker: string, content: string) => {
         let nextItem = /^\d/.test(marker) ? Number.parseInt(marker, 10) + 1 : 1;
         const prose = content.replace(/(?:^|\s)(\d+)[.)](?=\s)/g, (item, number: string, offset: number) => {
@@ -98,13 +102,21 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
         });
         const commands = splitCommands(prose, evaluatesOptions(text));
         // For analysis lists, preserve the item; for mixed content, extract any subordinate coding commands
-        if (evaluatesOptions(text) || /^(?:explain|describe|what|why|how|where|which|when|who)\b/i.test(text)) {
-          return prose; // Preserve analysis list items
+        if (isAnalysisList) {
+          listItems.push(prose);
+          return ''; // Remove from text, will be added back below
         }
         // For other cases, extract subordinate commands after the first clause
         return commands.slice(1)
           .filter(part => !/^\s*(?:and\s+)?(?:[-*•]|\d+[.)])\s+/.test(part)).join('\n');
       });
+    if (isAnalysisList && listItems.length > 0) {
+      // Preserve content after the list items (e.g., "Then implement...")
+      const afterList = replacedText.replace(/^\n+/, '').trim();
+      const result = text.slice(0, list.index) + ' regarding ' + listItems.join(' or ');
+      return afterList ? result + '. ' + afterList : result;
+    }
+    return text.slice(0, list.index) + '\n' + replacedText;
   });
   // Keep field boundaries: an analysis subject must not hide a coding description.
   const clauses = texts.flatMap(text => splitCommands(text))
@@ -122,8 +134,8 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
     })
     .flatMap(part => {
       const clause = normalizeClause(part.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ''));
-      // After normalization, recheck analysis intent and action descriptions
-      if (ANALYSIS_PREFIX.test(clause) || describesActions(clause)) return [clause];
+      // After normalization, recheck if clause describes actions (explanations with embedded mutations)
+      if (describesActions(clause)) return [clause];
       if (NO_CHANGE_PREFIX.test(clause)) return [clause];
       // Keep explanatory and negative context when exposing subordinate actions.
       const actions = [...clause.matchAll(/\b(?:to|before|after|while)\s+/gi)]
