@@ -1,35 +1,46 @@
-# oh-my-codex 0.21.18
+# oh-my-codex 0.21.19
 
-`0.21.18` is a patch release for the frozen range `v0.21.17..8edbeb8686a9f7288b45f03d8f553a72216832f1` (2 commits, 4 files, +358/−27; PR #3819).
+`0.21.19` is a patch release for agent model configuration and third-party provider fixes with correctness improvements for profile-scoped model resolution and provider classification (19 commits, 16 files, +925/−41; PRs #3824, #3825, #3827, #3828, #3829, #3831, #3832).
 
 ## Highlights
 
-- **Preserve foreign hook trust (#3819, fixing #3818):** clamp managed marker ranges at their first matching end, deduplicate repeated fences during refresh, and limit coordinate-family trust matching to indices OMX manages. Codex-approved foreign hook trust is preserved while tampered managed hashes remain fail-closed.
+- **Third-party provider model pins (#3824, fixing #3823):** stop baking `exactModel` pins for agents using third-party providers, allowing providers to rotate their default models while keeping agents resolvable. Reported by @hetingyi.
+- **Runtime-inherited model detection (#3825, fixing #3822):** align `omx doctor` spark-lane model checks with runtime-inherited agent model behavior, eliminating false positives that `omx setup --force` could never clear. Reported by @hetingyi.
+- **Profile-scoped model overrides (#3827):** honor profile-scoped agent model settings and override guidance in generated agent runtime config.
+- **Effective profile model resolution (#3831):** resolve active profile models before built-in fallbacks, keep exact pins when built-in providers omit models, and avoid claiming fallback models for provider-only configs.
+- **Final readiness poll (#3829):** always perform final team readiness poll before the timeout deadline.
 
 ## Compatibility
 
-- Setup and doctor no longer treat approved foreign hook trust as a tampered managed-trust key when repeated OMX banners occur near the end of `config.toml`.
-- Repeated managed fences are normalized during refresh; managed hook trust remains bounded to OMX-owned coordinates.
+- Agent generation and setup now correctly handle third-party provider model changes without requiring reinstallation.
+- Doctor diagnostics no longer report valid runtime-inherited configurations as stale.
+- Profile-scoped model overrides are now applied to all agents, not just those with explicit pin overrides.
+- Built-in provider model resolution now correctly reflects configured models across generation, pinning, and metadata.
 
 ## Validation
 
-- Pinned candidate `8edbeb8686a9f7288b45f03d8f553a72216832f1`: 17 latest-per-name check runs succeeded and 8 were skipped; none failed or remained incomplete.
-- Local checks passed: `npm run build:full`, `npm run build:runtime`, `npm run check:no-unused`, `npm run lint`, `npm run sync:plugin:check`, and `cargo metadata --locked --format-version 1 --no-deps`.
-- Focused generator, setup-refresh, doctor-invalid-config, and plugin-cache regression tests: 105 passed.
+- Pinned candidate `987f4b0d73f1f6c369ad24758c31197412dc3451` passed latest-per-name dev CI: 17 checks succeeded and 8 conditional checks were skipped, with no failures.
+- Release branch CI passed with all required checks green after rerunning known flakes (macOS Ralplan preflight at 30m timeout).
+- All Codex review findings resolved across release branch and dev merge.
 
 ## Merged PR inventory
 
 | PR | Author | Title |
 |---|---|---|
-| [#3819](https://github.com/Yeachan-Heo/oh-my-codex/pull/3819) | @Yeachan-Heo | fix(config): clamp managed marker ranges and preserve foreign hook trust |
+| [#3824](https://github.com/Yeachan-Heo/oh-my-codex/pull/3824) | @Yeachan-Heo | fix(agents): don't bake exactModel pins for third-party providers |
+| [#3825](https://github.com/Yeachan-Heo/oh-my-codex/pull/3825) | @Yeachan-Heo | fix(doctor): align spark-lane model check with runtime-inherited agents |
+| [#3827](https://github.com/Yeachan-Heo/oh-my-codex/pull/3827) | @Yeachan-Heo | fix(agents): honor profile-scoped models and override guidance |
+| [#3828](https://github.com/Yeachan-Heo/oh-my-codex/pull/3828) | @Yeachan-Heo | test(team): make MDM-marker readiness termination deterministic |
+| [#3829](https://github.com/Yeachan-Heo/oh-my-codex/pull/3829) | @Yeachan-Heo | fix(team): always take a final readiness poll before the deadline |
+| [#3831](https://github.com/Yeachan-Heo/oh-my-codex/pull/3831) | @Yeachan-Heo | fix(agents): resolve the effective profile model for pins, metadata and guidance |
 
-Issue #3818 was reported by @hetingyi.
+Issues #3822 and #3823 were reported by @hetingyi.
 
 ## Contributors
 
-Thanks to @Yeachan-Heo for the fix and @hetingyi for reporting the issue.
+Thanks to @Yeachan-Heo for the fixes and @hetingyi for reporting the issues.
 
-**Full Changelog**: [`v0.21.17...v0.21.18`](https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.17...v0.21.18)
+**Full Changelog**: [`v0.21.18...v0.21.19`](https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.18...v0.21.19)
 
 —
 *[repo owner's gaebal-gajae (clawdbot) 🦞]*
