@@ -1724,19 +1724,31 @@ describe("omx setup install mode behavior", () => {
 					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
 					assert.ok(packagedMarketplace);
 
-					// (d) Verify that removalSafe=false (untrusted cache) results in NO 'codex plugin remove' advice
+					// (d-i) Verify that removalSafe=false (untrusted symlink cache) does NOT output 'codex plugin remove' advice
 					const cacheBaseDir = await packagedPluginCacheDir(codexHomeDir);
 					await mkdir(dirname(cacheBaseDir), { recursive: true });
 					const externalCacheDir = join(wd, "external-cache");
 					await mkdir(externalCacheDir, { recursive: true });
 					await symlink(externalCacheDir, cacheBaseDir);
 
-					const unsafeResult = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
+					const unsafeOutput = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
 					// When removalSafe=false, the setup command SHOULD NOT output 'codex plugin remove' advice
-					if (unsafeResult.removalSafe === false) {
-						// This is correct: removalSafe=false means the advice should be omitted
-						assert.equal(unsafeResult.removalSafe, false, "(d) removalSafe should be false for untrusted cache");
-					}
+					assert.match(unsafeOutput, /symlink or non-directory entry/);
+					assert.doesNotMatch(unsafeOutput, /codex plugin remove/, "(d-i) untrusted symlink cache should not suggest 'codex plugin remove'");
+
+					// (d-ii) Verify that safe repair (dead launcher) DOES output 'codex plugin remove' advice
+					await rm(codexHomeDir, { recursive: true, force: true });
+					await mkdir(dirname(codexHomeDir), { recursive: true });
+					const cacheDir = await seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir);
+
+					const safeOutput = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
+					// When removalSafe !== false (safe repair for dead launcher), the setup command SHOULD output 'codex plugin remove' advice
+					assert.match(safeOutput, /pinned launcher command does not exist/);
+					assert.match(safeOutput, /codex plugin remove oh-my-codex@oh-my-codex-local --json/, "(d-ii) dead launcher safe repair should suggest 'codex plugin remove'");
 				});
 			});
 		} finally {
