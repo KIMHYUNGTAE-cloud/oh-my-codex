@@ -3596,6 +3596,10 @@ export function waitForWorkerReady(
     return paneLooksReady(scrollbackResult.stdout);
   };
 
+  // Reserve time for a final readiness poll to catch incompatibility markers
+  // that may appear after the first check() consumes most of the budget (finding #4309679342).
+  // Use a conservative estimate for check() runtime to ensure the final poll happens before deadline.
+  const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
     if (check()) return true;
@@ -3607,13 +3611,14 @@ export function waitForWorkerReady(
       promptDismissed = false;
     }
     const remaining = timeoutMs - (Date.now() - startedAt);
-    if (remaining <= 0) break;
-    sleepSeconds(Math.max(0, Math.min(delayMs, remaining)) / 1000);
+    // Reserve time for one final check; exit early if not enough time remains
+    if (remaining <= minCheckTimeMs) break;
+    // Sleep for min of backoff or remaining-minCheckTimeMs to leave time for final poll
+    sleepSeconds(Math.max(0, Math.min(delayMs, remaining - minCheckTimeMs)) / 1000);
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
 
-  // Always perform a final check before the deadline to catch incompatibility markers
-  // that may appear on the second capture (finding #4309679342)
+  // Final check before returning false, guaranteed to happen before the deadline
   if (check()) return true;
   if (blockedByTrustPrompt) return false;
 
@@ -3700,6 +3705,10 @@ export async function waitForWorkerReadyDetailedAsync(
     return paneLooksReady(scrollbackResult.stdout);
   };
 
+  // Reserve time for a final readiness poll to catch incompatibility markers
+  // that may appear after the first check() consumes most of the budget (finding #4309679342).
+  // Use a conservative estimate for check() runtime to ensure the final poll happens before deadline.
+  const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
     if (await check()) return true;
@@ -3712,13 +3721,14 @@ export async function waitForWorkerReadyDetailedAsync(
       promptDismissed = false;
     }
     const remaining = timeoutMs - (Date.now() - startedAt);
-    if (remaining <= 0) break;
-    await sleep(Math.max(0, Math.min(delayMs, remaining)));
+    // Reserve time for one final check; exit early if not enough time remains
+    if (remaining <= minCheckTimeMs) break;
+    // Sleep for min of backoff or remaining-minCheckTimeMs to leave time for final poll
+    await sleep(Math.max(0, Math.min(delayMs, remaining - minCheckTimeMs)));
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
 
-  // Always perform a final check before the deadline to catch incompatibility markers
-  // that may appear on the second capture (finding #4309679342)
+  // Final check before returning false, guaranteed to happen before the deadline
   if (await check()) return true;
   if (startupIncompatible) return false;
   if (blockedByTrustPrompt) return false;
