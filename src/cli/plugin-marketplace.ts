@@ -3894,6 +3894,8 @@ async function materializePackagedOmxPluginCacheImpl(
 	if (rootState === "directory" && !options.repairCache) {
 		const incompat = await getPinnedLauncherIncompatibilityReason(inspectedCacheDir, packagedMarketplace);
 		if (incompat) {
+			// Dead launcher (command or target doesn't exist) is safe to remove and rebuild
+			const isDeadLauncher = incompat.reason.includes("does not exist");
 			return {
 				status: "stale-launcher",
 				cacheDir,
@@ -3901,7 +3903,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: incompat.reason,
 				launcherTarget: incompat.target,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
-				removalSafe: false,
+				removalSafe: isDeadLauncher,
 			};
 		}
 		// #3699: an existing same-version snapshot is immutable, so a Team-mode change
