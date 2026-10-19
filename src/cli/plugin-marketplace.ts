@@ -699,11 +699,14 @@ export async function readOmxPluginCacheFileNoFollow(
 			anchorBefore = await anchorHandle.stat();
 			if (!anchorBefore.isDirectory()) return null;
 			if (typeof anchorBefore.dev !== "number" || typeof anchorBefore.ino !== "number") return null;
-			const fdPath = process.platform === "linux"
+			const anchorDirReal = process.platform === "linux"
 				? directoryFdPath(anchorHandle.fd)
-				: resolve(options.anchorDir);
-			if (!fdPath) return null;
-			const relativePath = relative(resolve(options.anchorDir), resolve(path));
+				: await realpath(options.anchorDir).catch(() => null);
+			if (!anchorDirReal) return null;
+			const pathReal = await realpath(path).catch(() => null);
+			if (!pathReal) return null;
+			const fdPath = anchorDirReal;
+			const relativePath = relative(anchorDirReal, pathReal);
 			if (!relativePath || relativePath.startsWith("..")) return null;
 			const components = relativePath.split(sep);
 			if (components.some((component) => !component || component === "." || component === "..")) return null;
