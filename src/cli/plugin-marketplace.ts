@@ -3850,15 +3850,19 @@ async function materializePackagedOmxPluginCacheImpl(
 		...options,
 		cacheDirOverride: inspectedCacheDir,
 	})) {
-		return {
-			status: "unchanged",
-			cacheDir,
-			version,
-			retiredDirs: options.dryRun
-				? []
-				: await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
-			removalSafe: false,
-		};
+		// When doing a dry-run repair, continue to check for live pins/obstacles even if cache is valid
+		if (!(options.repairCache && options.dryRun)) {
+			return {
+				status: "unchanged",
+				cacheDir,
+				version,
+				retiredDirs: options.dryRun
+					? []
+					: await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+				removalSafe: false,
+			};
+		}
+		// For dry-run repair, continue to inspect for live pins/obstacles
 	}
 	// Same-version directory exists but is not byte-identical: distinguish immutable-preserved vs dead/provenance-incompatible launcher.
 	// Preserve #3499 immutability: never rewrite an existing same-version directory in place.
@@ -3969,16 +3973,25 @@ async function materializePackagedOmxPluginCacheImpl(
 		return { status: "unavailable", cacheDir, version, removalSafe: false };
 	}
 	if (rootState === "directory" && options.repairCache && options.dryRun) {
-		const eligibility = options.anchoredCacheBaseRef
-			? await inspectSnapshotRepairEligibility(options.anchoredCacheBaseRef, version)
-			: { eligible: false, reason: `same-version cache at ${cacheDir} cannot be safely inspected without an anchored cache namespace; preserving it` };
-		return eligibility.eligible
-			? { status: "materialized", cacheDir, version, retiredDirs: [], removalSafe: true }
-			: { status: "stale-launcher", cacheDir, version, reason: eligibility.reason, launcherTarget: undefined, retiredDirs: [], removalSafe: false };
+		const cacheBase = omxPluginCacheBase(codexHomeDir);
+		let cacheBaseRef = options.anchoredCacheBaseRef;
+		let ownsCacheBaseRef = false;
+		try {
+			if (!cacheBaseRef) {
+				cacheBaseRef = await openDirectoryRef(cacheBase);
+				ownsCacheBaseRef = true;
+			}
+			const eligibility = await inspectSnapshotRepairEligibility(cacheBaseRef, version);
+			return eligibility.eligible
+				? { status: "materialized", cacheDir, version, retiredDirs: [], removalSafe: true }
+				: { status: "stale-launcher", cacheDir, version, reason: eligibility.reason, launcherTarget: undefined, retiredDirs: [], removalSafe: false };
+		} finally {
+			if (ownsCacheBaseRef && cacheBaseRef) await cacheBaseRef.handle.close().catch(() => {});
+		}
 	}
 	if (!options.dryRun) {
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
-		const noFollowFlags = fsConstants.O_NOFOLLOW;
+	const noFollowFlags = fsConstants.O_NOFOLLOW;
 		const directoryFlags = fsConstants.O_DIRECTORY;
 		if (process.platform !== "win32" && (typeof noFollowFlags !== "number" || typeof directoryFlags !== "number")) {
 			return {
@@ -4031,7 +4044,9 @@ async function materializePackagedOmxPluginCacheImpl(
 			cacheDir,
 			version,
 			retiredDirs: [],
-			removalSafe: false,
+			// For repairs: true if no pins/obstacles detected; false if pins/obstacles detected
+			// For new publications: true (clean installation)
+			removalSafe: true,
 		};
 		let cleanupError: unknown = null;
 		let finalRef: DirectoryRef | undefined;
@@ -4182,17 +4197,19 @@ async function materializePackagedOmxPluginCacheImpl(
 						publicationLockGuard,
 					);
 					if (preservedDirs.length > 0) outcome.preservedDirs = preservedDirs;
-				} catch (error) {
-					outcome = {
-						status: "stale-launcher",
-						cacheDir,
-						version,
-						reason: `immutable OMX plugin cache retirement failed closed: ${(error as Error).message}`,
-						launcherTarget: undefined,
-						retiredDirs: [],
-						removalSafe: false,
-					};
-				}
+					// Successful publication: repair was safe (no pins/obstacles detected and removed)
+					outcome.removalSafe = true;
+	} catch (error) {
+		outcome = {
+			status: "stale-launcher",
+			cacheDir,
+			version,
+			reason: `immutable OMX plugin cache publication failed closed: ${(error as Error).message}`,
+			launcherTarget: undefined,
+			retiredDirs: [],
+			removalSafe: false,
+		};
+	}
 			}
 		} catch (error) {
 			outcome = {
