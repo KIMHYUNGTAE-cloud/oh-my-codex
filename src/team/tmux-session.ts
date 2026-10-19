@@ -3602,7 +3602,12 @@ export function waitForWorkerReady(
   const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
-    if (check()) return true;
+    if (check()) {
+      // Poll returned true (ready). Verify we're still within deadline.
+      const checkElapsed = Date.now() - startedAt;
+      if (checkElapsed <= timeoutMs) return true;
+      // Exceeded deadline during the poll; don't report success.
+    }
     if (blockedByTrustPrompt) return false;
     // After dismissing a trust prompt, reset backoff so we re-check quickly
     // instead of sleeping 2s/4s/8s while the worker is starting up.
@@ -3618,9 +3623,15 @@ export function waitForWorkerReady(
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
 
-  // Final check before returning false, only if budget remains (finding #4310223535)
+  // Final check before returning false, only if budget remains (finding #4310223535).
+  // Recheck elapsed time after the poll to ensure the result is returned before deadline.
   const finalRemaining = timeoutMs - (Date.now() - startedAt);
-  if (finalRemaining > 0 && check()) return true;
+  if (finalRemaining > 0 && check()) {
+    // Poll returned true (ready). Verify we're still within deadline.
+    const finalElapsed = Date.now() - startedAt;
+    if (finalElapsed <= timeoutMs) return true;
+    // Exceeded deadline during the final poll; don't report success.
+  }
   if (blockedByTrustPrompt) return false;
 
   return false;
@@ -3712,7 +3723,12 @@ export async function waitForWorkerReadyDetailedAsync(
   const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
-    if (await check()) return true;
+    if (await check()) {
+      // Poll returned true (ready). Verify we're still within deadline.
+      const checkElapsed = Date.now() - startedAt;
+      if (checkElapsed <= timeoutMs) return true;
+      // Exceeded deadline during the poll; don't report success.
+    }
     if (startupIncompatible) return false;
     if (blockedByTrustPrompt) return false;
     // After dismissing a trust prompt, reset backoff so we re-check quickly
@@ -3729,9 +3745,15 @@ export async function waitForWorkerReadyDetailedAsync(
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
 
-  // Final check before returning false, only if budget remains (finding #4310223535)
+  // Final check before returning false, only if budget remains (finding #4310223535).
+  // Recheck elapsed time after the poll to ensure the result is returned before deadline.
   const finalRemaining = timeoutMs - (Date.now() - startedAt);
-  if (finalRemaining > 0 && await check()) return true;
+  if (finalRemaining > 0 && await check()) {
+    // Poll returned true (ready). Verify we're still within deadline.
+    const finalElapsed = Date.now() - startedAt;
+    if (finalElapsed <= timeoutMs) return true;
+    // Exceeded deadline during the final poll; don't report success.
+  }
   if (startupIncompatible) return false;
   if (blockedByTrustPrompt) return false;
 

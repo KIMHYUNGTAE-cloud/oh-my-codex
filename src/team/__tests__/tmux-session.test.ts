@@ -4425,6 +4425,41 @@ esac
       assert.equal(result, false, "waitForWorkerReady with timeout=0 should return false, not run checks after deadline");
     });
   });
+
+  it('enforces deadline on every poll including when ready (Codex finding 4310966027)', async () => {
+    // Test that even if a poll returns true (ready), we recheck the deadline.
+    // Mock tmux to return ready after a delay that causes us to exceed the timeout.
+    const delaySeconds = 0.15;
+    const timeoutMs = 100;
+    // With a timeout shorter than the delay, the poll will complete after deadline
+    // and should return false despite the ready output.
+    await withMockTmuxFixture(
+      'omx-worker-ready-deadline-enforce-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    # Simulate slow capture-pane that takes longer than the remaining timeout
+    sleep ${delaySeconds}
+    cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac`,
+      async () => {
+        // Poll with a very short timeout that will be exceeded during the capture
+        const result = waitForWorkerReady('omx-team-x', 1, timeoutMs);
+        // Even though capture-pane returns ready, the deadline was exceeded
+        // so we should return false
+        assert.equal(result, false, "waitForWorkerReady should return false when poll completes after deadline");
+      },
+    );
+  });
 });
 
 
@@ -4736,6 +4771,41 @@ esac
       // With timeout=0, we should get false (not a successful check after deadline)
       assert.equal(result, false, "waitForWorkerReadyAsync with timeout=0 should return false, not run checks after deadline");
     });
+  });
+
+  it('enforces deadline on every poll including when ready (Codex finding 4310966027)', async () => {
+    // Test that even if a poll returns true (ready), we recheck the deadline.
+    // Mock tmux to return ready after a delay that causes us to exceed the timeout.
+    const delaySeconds = 0.15;
+    const timeoutMs = 100;
+    // With a timeout shorter than the delay, the poll will complete after deadline
+    // and should return false despite the ready output.
+    await withMockTmuxFixture(
+      'omx-worker-ready-deadline-enforce-async-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    # Simulate slow capture-pane that takes longer than the remaining timeout
+    sleep ${delaySeconds}
+    cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac`,
+      async () => {
+        // Poll with a very short timeout that will be exceeded during the capture
+        const result = await waitForWorkerReadyAsync('omx-team-x', 1, timeoutMs);
+        // Even though capture-pane returns ready, the deadline was exceeded
+        // so we should return false
+        assert.equal(result, false, "waitForWorkerReadyAsync should return false when poll completes after deadline");
+      },
+    );
   });
 });
 
