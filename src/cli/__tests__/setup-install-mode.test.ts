@@ -39,7 +39,6 @@ import {
 } from "../../config/generator.js";
 import {
 	materializePackagedOmxPluginCache,
-	registerOmxPluginCacheLivePin,
 	resolvePackagedOmxMarketplace,
 	computeOmxPluginCacheClaimDigest,
 } from "../plugin-marketplace.js";
@@ -1478,8 +1477,8 @@ describe("omx setup install mode behavior", () => {
 					assert.deepEqual(launcher.argsPrefix, ["/stale/omx.js"]);
 					assert.doesNotMatch(output, /Invalidated .* stale Codex plugin discovery cache/);
 					assert.doesNotMatch(output, /Local Codex plugin cache already exposes packaged OMX skills/);
-					assert.match(output, /not safe to use as current/);
-					assert.match(output, /omx setup --plugin --repair-plugin-cache/);
+					assert.match(output, /incompatible launcher provenance/);
+					assert.match(output, /codex plugin remove oh-my-codex@oh-my-codex-local --json/);
 					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
 					assert.ok(packagedMarketplace);
 					const materialized = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
@@ -1491,104 +1490,6 @@ describe("omx setup install mode behavior", () => {
 			await rm(wd, { recursive: true, force: true });
 		}
 	});
-
-	it("scoped cache repair preserves live pins and avoids force-mode maintenance", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-setup-plugin-cache-repair-"));
-		try {
-			await withIsolatedUserHome(wd, async (codexHomeDir) => {
-				await withTempCwd(wd, async () => {
-					await mkdir(join(wd, ".omx"), { recursive: true });
-					const hudConfigPath = join(wd, ".omx", "hud-config.json");
-					const userHudConfig = '{"preset":"custom"}\n';
-					await writeFile(hudConfigPath, userHudConfig);
-					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
-					assert.ok(packagedMarketplace);
-					const initial = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
-					assert.equal(initial.status, "materialized");
-					const cacheDir = initial.cacheDir!;
-					const launcherPath = join(cacheDir, "hooks", "omx-command.json");
-					await writeFile(launcherPath, `${JSON.stringify({ command: "/stale/node", argsPrefix: ["/stale/omx.js"] })}\n`);
-					await writeBoundCompletionMarker(cacheDir);
-					assert.equal(await registerOmxPluginCacheLivePin(cacheDir, "scoped-repair-live-session", process.pid), true);
-					const pinnedDryRun = await materializePackagedOmxPluginCache(
-						codexHomeDir,
-						packagedMarketplace,
-						{ dryRun: true, repairCache: true },
-					);
-					assert.equal(pinnedDryRun.status, "stale-launcher");
-					assert.match(pinnedDryRun.reason ?? "", /pinned by a live Codex session/);
-
-					const pinnedOutput = await captureConsoleOutput(async () => {
-						await setup({
-							scope: "user",
-							installMode: "plugin",
-							repairPluginCache: true,
-							pluginAgentsMdPrompt: async () => false,
-							codexFeaturesProbe: () => "hooks stable true\nplugin_hooks experimental true\ngoals experimental true\n",
-							codexVersionProbe: () => "codex-cli 0.999.0",
-						});
-					});
-					assert.match(pinnedOutput, /pinned by a live Codex session/);
-					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, "/stale/node");
-
-					await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
-					const repairedOutput = await captureConsoleOutput(async () => {
-						await setup({
-							scope: "user",
-							installMode: "plugin",
-							repairPluginCache: true,
-							pluginAgentsMdPrompt: async () => false,
-							codexFeaturesProbe: () => "hooks stable true\nplugin_hooks experimental true\ngoals experimental true\n",
-							codexVersionProbe: () => "codex-cli 0.999.0",
-						});
-					});
-					assert.match(repairedOutput, /Installed local Codex plugin cache/);
-					assert.doesNotMatch(repairedOutput, /Force mode: enabled additional destructive maintenance/);
-					assert.equal(await readFile(hudConfigPath, "utf-8"), userHudConfig);
-					const repaired = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
-					assert.equal(repaired.status, "unchanged");
-					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, process.execPath);
-					await assert.rejects(lstat(join(cacheDir, ".omx-live-pin")), { code: "ENOENT" });
-
-					await rm(join(cacheDir, ".omx-managed"), { force: true });
-					const unverifiedDryRun = await materializePackagedOmxPluginCache(
-						codexHomeDir,
-						packagedMarketplace,
-						{ dryRun: true, repairCache: true },
-					);
-					assert.equal(unverifiedDryRun.status, "stale-launcher");
-					assert.match(unverifiedDryRun.reason ?? "", /not a verified managed OMX snapshot/);
-					assert.equal(existsSync(join(cacheDir, ".omx-managed")), false);
-				});
-			});
-		} finally {
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects scoped plugin-cache repair outside plugin setup mode", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-setup-plugin-cache-mode-"));
-		try {
-			await withIsolatedUserHome(wd, async () => {
-				await withTempCwd(wd, async () => {
-					await assert.rejects(
-						setup({
-							scope: "user",
-							installMode: "legacy",
-							repairPluginCache: true,
-							dryRun: true,
-							codexFeaturesProbe: () => "hooks stable true\nplugin_hooks experimental true\ngoals experimental true\n",
-							codexVersionProbe: () => "codex-cli 0.999.0",
-						}),
-						/--repair-plugin-cache requires plugin setup mode/,
-					);
-				});
-			});
-		} finally {
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
-
 	it("refuses to replace an already published plugin cache root", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
@@ -2845,28 +2746,28 @@ describe("omx setup install mode behavior", () => {
 							const shim = Buffer.from(
 								buildManagedCodexNativeHookWindowsShimContent(packageRoot),
 								"utf-8",
-						);
-						await mkdir(dirname(metadataPath), { recursive: true });
-						await mkdir(dirname(shimPath), { recursive: true });
-						await writeFile(configPath, config);
-						await writeFile(hooksPath, hooks);
-						await writeFile(shimPath, shim);
-						await writeFile(metadataPath, metadata);
+							);
+							await mkdir(dirname(metadataPath), { recursive: true });
+							await mkdir(dirname(shimPath), { recursive: true });
+							await writeFile(configPath, config);
+							await writeFile(hooksPath, hooks);
+							await writeFile(shimPath, shim);
+							await writeFile(metadataPath, metadata);
 
-					await assert.rejects(
-						setup({
-							scope: "user",
-							installMode: "plugin",
-							pluginAgentsMdPrompt: async () => false,
-							codexFeaturesProbe: () =>
-								"hooks stable true\nplugin_hooks experimental true\n",
-						}),
-						(error: unknown) =>
-							typeof error === "object" &&
-							error !== null &&
-							"code" in error &&
-							(error as { code?: unknown }).code === "managed_trust_key_conflict",
-					);
+							await assert.rejects(
+								setup({
+									scope: "user",
+									installMode: "plugin",
+									pluginAgentsMdPrompt: async () => false,
+									codexFeaturesProbe: () =>
+										"hooks stable true\nplugin_hooks experimental true\n",
+								}),
+								(error: unknown) =>
+									typeof error === "object" &&
+									error !== null &&
+									"code" in error &&
+									(error as { code?: unknown }).code === "managed_trust_key_conflict",
+							);
 							assert.deepEqual(await readFile(configPath), Buffer.from(config, "utf-8"));
 							assert.deepEqual(await readFile(hooksPath), Buffer.from(hooks, "utf-8"));
 							assert.deepEqual(await readFile(shimPath), shim);
@@ -3139,8 +3040,8 @@ describe("omx setup install mode behavior", () => {
 								`# concurrent ${mutationKind} shim replacement\n`,
 								"utf-8",
 							);
-							await mkdir(dirname(shimPath), { recursive: true });
 							await writeFile(hooksPath, hooksBefore);
+							await mkdir(dirname(shimPath), { recursive: true });
 							await writeFile(
 								shimPath,
 								buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3212,8 +3113,8 @@ describe("omx setup install mode behavior", () => {
 						"utf-8",
 					);
 					const foreignShim = Buffer.from("# concurrent finalization shim replacement\n", "utf-8");
-					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(hooksPath, hooksBefore);
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						shimPath,
 						buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3284,8 +3185,8 @@ describe("omx setup install mode behavior", () => {
 					codexFeaturesProbe: () =>
 						"hooks stable true\nplugin_hooks experimental true\n",
 				});
-				await mkdir(dirname(shimPath), { recursive: true });
 				await writeFile(hooksPath, futureHooks);
+				await mkdir(dirname(shimPath), { recursive: true });
 				await writeFile(
 					shimPath,
 					buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3329,7 +3230,6 @@ describe("omx setup install mode behavior", () => {
 				await withTempCwd(wd, async () => {
 					const hooksPath = join(codexHomeDir, "hooks.json");
 					const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexHomeDir);
-					const shimPathWindows = buildManagedCodexNativeHookWindowsShimPath(codexHomeDir);
 					const managed = buildManagedCodexHooksConfig(packageRoot, {
 						platform: "win32",
 						codexHomeDir,
@@ -3348,11 +3248,11 @@ describe("omx setup install mode behavior", () => {
 					).replace(
 						JSON.stringify(sentinel),
 						JSON.stringify(
-							`& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimPathWindows}'`,
-						).replace(/\\\\\\\\/g, "\\u005c"),
+							`& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimPath}'`,
+						).replace(/\\\\/g, "\\u005c"),
 					) + "\n";
-					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(hooksPath, futureHooks);
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						shimPath,
 						buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3386,31 +3286,31 @@ describe("omx setup install mode behavior", () => {
 				await withTempCwd(wd, async () => {
 			const hooksPath = join(codexHomeDir, "hooks.json");
 					const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexHomeDir);
-					const shimPathWindows = buildManagedCodexNativeHookWindowsShimPath(codexHomeDir);
-					const shimAlias = shimPathWindows
-						.replace(/[\\\/]+hooks[\\\/]+/i, "\\hooks\\\\.\\")
-						.replace(/omx-native-hook-windows-shim\.ps1$/i, "OMX-NATIVE-HOOK-WINDOWS-SHIM.PS1")
-						.replace(/\\/g, "/");
-					const managed = buildManagedCodexHooksConfig(packageRoot, {
-						platform: "win32",
-						codexHomeDir,
-					});
-					await mkdir(dirname(shimPath), { recursive: true });
-					await writeFile(
-						hooksPath,
-						JSON.stringify({
-							...managed,
-							hooks: {
-								...managed.hooks,
-								FutureEvent: [{
-									hooks: [{
-										type: "command",
-										command: `& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimAlias}'`,
-									}],
+				const shimPathWindows = buildManagedCodexNativeHookWindowsShimPath(codexHomeDir);
+				const shimAlias = shimPathWindows
+					.replace(/[\\\\/]+hooks[\\\\/]+/i, "\\hooks\\\\.\\")
+					.replace(/omx-native-hook-windows-shim\\.ps1$/i, "OMX-NATIVE-HOOK-WINDOWS-SHIM.PS1")
+					.replace(/\\\\/g, "/");
+				const managed = buildManagedCodexHooksConfig(packageRoot, {
+					platform: "win32",
+					codexHomeDir,
+				});
+				await writeFile(
+					hooksPath,
+					JSON.stringify({
+						...managed,
+						hooks: {
+							...managed.hooks,
+							FutureEvent: [{
+								hooks: [{
+									type: "command",
+									command: `& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File '${shimAlias}'`,
 								}],
-							},
-						}, null, 2) + "\n",
-					);
+							}],
+						},
+					}, null, 2) + "\n",
+				);
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						shimPath,
 						buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3445,7 +3345,6 @@ describe("omx setup install mode behavior", () => {
 						platform: "win32",
 						codexHomeDir,
 					});
-					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						hooksPath,
 						JSON.stringify({
@@ -3460,8 +3359,9 @@ describe("omx setup install mode behavior", () => {
 									}],
 								}],
 							},
-						}, null, 2) + "\n",
-					);
+					}, null, 2) + "\n",
+				);
+					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						shimPath,
 						buildManagedCodexNativeHookWindowsShimContent(packageRoot),
@@ -3477,15 +3377,15 @@ describe("omx setup install mode behavior", () => {
 					});
 					assert.equal(existsSync(shimPath), true);
 					assert.match(await readFile(hooksPath, "utf-8"), /FutureEvent/);
-				});
 			});
-		} finally {
-			resetPlatform();
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
-	it("does not retain a shim for inert future-event metadata", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-plugin-future-shim-metadata-"));
+		});
+	} finally {
+		resetPlatform();
+		await rm(wd, { recursive: true, force: true });
+	}
+});
+it("does not retain a shim for inert future-event metadata", async () => {
+	const wd = await mkdtemp(join(tmpdir(), "omx-plugin-future-shim-metadata-"));
 		const resetPlatform = setNativeHookTransactionPlatformForTest("win32");
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
@@ -3496,7 +3396,6 @@ describe("omx setup install mode behavior", () => {
 						platform: "win32",
 						codexHomeDir,
 					});
-					await mkdir(dirname(shimPath), { recursive: true });
 					await writeFile(
 						hooksPath,
 						JSON.stringify(
@@ -3514,22 +3413,23 @@ describe("omx setup install mode behavior", () => {
 							},
 							null,
 							2,
-						) + "\n",
-					);
-					await writeFile(
-						shimPath,
-						buildManagedCodexNativeHookWindowsShimContent(packageRoot),
-					);
+										) + "\n",
+							);
+							await mkdir(dirname(shimPath), { recursive: true });
+							await writeFile(
+								shimPath,
+								buildManagedCodexNativeHookWindowsShimContent(packageRoot),
+							);
 
-					await setup({
-						scope: "user",
-						installMode: "plugin",
-						pluginAgentsMdPrompt: async () => false,
-						skipNativeAgentRefresh: true,
-						codexFeaturesProbe: () =>
-							"hooks stable true\nplugin_hooks experimental true\n",
-					});
-					assert.equal(existsSync(shimPath), false);
+							await setup({
+								scope: "user",
+								installMode: "plugin",
+								pluginAgentsMdPrompt: async () => false,
+								skipNativeAgentRefresh: true,
+								codexFeaturesProbe: () =>
+									"hooks stable true\nplugin_hooks experimental true\n",
+							});
+							assert.equal(existsSync(shimPath), false);
 					assert.match(await readFile(hooksPath, "utf-8"), /FutureEvent/);
 				});
 			});

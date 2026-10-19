@@ -34,7 +34,6 @@ import {
 } from "../config/generator.js";
 import {
   buildManagedCodexNativeHookWindowsShimContent,
-  buildManagedCodexNativeHookWindowsShimPath,
   buildManagedCodexNativeHookWindowsShimPathForFilesystem,
   classifyManagedCodexNativeHookWindowsShimOwnership,
   escapeTomlBasicString,

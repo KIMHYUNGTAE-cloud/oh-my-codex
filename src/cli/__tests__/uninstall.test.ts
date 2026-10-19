@@ -931,6 +931,7 @@ describe('omx uninstall', () => {
         await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
         await writeFile(hooksPath, hooks);
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(
           shimPath,
           buildManagedCodexNativeHookWindowsShimContent(packageRoot()),
@@ -959,7 +960,7 @@ describe('omx uninstall', () => {
         const shimAlias = shimPathWindows
           .replace(/[\\/]+hooks[\\/]+/i, '\\hooks\\\\.\\')
           .replace(/omx-native-hook-windows-shim\.ps1$/i, 'OMX-NATIVE-HOOK-WINDOWS-SHIM.PS1')
-          .replace(/\\/g, '/');
+          .replace(/\\\\/g, '/');
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir: codexDir,
@@ -980,6 +981,7 @@ describe('omx uninstall', () => {
         await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
         await writeFile(hooksPath, hooks);
+        await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(
           shimPath,
           buildManagedCodexNativeHookWindowsShimContent(packageRoot()),

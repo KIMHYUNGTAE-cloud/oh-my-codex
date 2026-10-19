@@ -83,7 +83,6 @@ import {
 import type { CodexHookFeatureFlag, CodexPluginHookFeatureFlag } from "../config/codex-feature-flags.js";
 import {
 	buildManagedCodexNativeHookWindowsShimContent,
-	buildManagedCodexNativeHookWindowsShimPath,
 	buildManagedCodexNativeHookWindowsShimPathForFilesystem,
 	escapeTomlBasicString,
 	planManagedCodexHooksMerge,
