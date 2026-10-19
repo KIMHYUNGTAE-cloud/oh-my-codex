@@ -57,7 +57,8 @@ const packageRoot = process.cwd();
 
 async function writeBoundCompletionMarker(cacheDir: string): Promise<void> {
 	const claimDigest = await computeOmxPluginCacheClaimDigest(cacheDir);
-	await writeFile(join(cacheDir, ".omx-complete"), `${JSON.stringify({ claimDigest })}\n`);
+	const version = basename(cacheDir);
+	await writeFile(join(cacheDir, ".omx-complete"), `${JSON.stringify({ version, claimDigest })}\n`);
 }
 let previousPathForFakeCodex: string | undefined;
 let fakeCodexBinDir: string | null = null;
@@ -706,6 +707,7 @@ async function seedSameVersionPluginCacheWithStaleHooks(codexHomeDir: string): P
 	assert.ok(preToolUse, "expected packaged plugin PreToolUse hook fixture");
 	preToolUse.matcher = "Bash";
 	await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n");
+	await writeFile(join(cacheDir, ".omx-managed"), `${process.pid}\n`);
 	await writeBoundCompletionMarker(cacheDir);
 	return cacheDir;
 }
@@ -721,6 +723,7 @@ async function seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir: string)
 		join(cacheDir, "hooks", "omx-command.json"),
 		JSON.stringify({ command: "/stale/node", argsPrefix: ["/stale/omx.js"] }, null, 2) + "\n",
 	);
+	await writeFile(join(cacheDir, ".omx-managed"), `${process.pid}\n`);
 	await writeBoundCompletionMarker(cacheDir);
 	return cacheDir;
 }
@@ -1622,7 +1625,8 @@ describe("omx setup install mode behavior", () => {
 										{ repairCache: true },
 									);
 									assert.equal(latePinResult.status, "stale-launcher", "(a) late-pin should result in stale-launcher status");
-									assert.match(latePinResult.reason ?? "", /became pinned or changed during repair/, "(a) late-pin: should cite pin/change reason");
+									assert.equal(hookCalled, true, "(a) late-pin: pin must be created after inspection, inside the removal path");
+									assert.match(latePinResult.reason ?? "", /pinned by a live Codex session|became pinned or changed during repair/, "(a) late-pin: should cite pin/change reason");
 									assert.equal(latePinResult.removalSafe, false, "(a) late-pin should have removalSafe=false");
 									// Verify snapshot remains untouched
 									assert.equal(existsSync(cacheDir), true, "(a) late-pin: snapshot should remain untouched");
