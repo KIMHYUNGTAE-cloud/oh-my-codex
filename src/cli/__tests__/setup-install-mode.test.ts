@@ -1531,6 +1531,8 @@ describe("omx setup install mode behavior", () => {
 						});
 					});
 					assert.match(pinnedOutput, /pinned by a live Codex session/);
+					assert.doesNotMatch(pinnedOutput, /codex plugin remove/);
+					assert.match(pinnedOutput, /close that session before repairing it/);
 					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, "/stale/node");
 
 					await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
@@ -6280,6 +6282,55 @@ describe("omx setup install mode behavior", () => {
 			});
 		} finally {
 			resetFailureInjector?.();
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves fail-closed cache recovery guidance for symlink/untrusted stale launcher", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-untrusted-cache-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const cacheBaseDir = await packagedPluginCacheDir(codexHomeDir);
+					await mkdir(dirname(cacheBaseDir), { recursive: true });
+					// Create a symlink to an external directory instead of a real cache
+					const externalCacheDir = join(wd, "external-cache");
+					await mkdir(externalCacheDir, { recursive: true });
+					await symlink(externalCacheDir, cacheBaseDir);
+
+					const output = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
+
+					// For symlink/untrusted cases, should NOT suggest codex plugin remove
+					assert.match(output, /symlink or non-directory entry/);
+					assert.doesNotMatch(output, /codex plugin remove/);
+					// Should preserve the specific recovery guidance for untrusted entries
+					assert.match(output, /remove only the cache entry at .* itself without following symlinks/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("includes codex plugin remove guidance for dead launcher stale-launcher result", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-dead-launcher-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const cacheDir = await seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir);
+
+					const output = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
+
+					// For dead launcher, should suggest codex plugin remove
+					assert.match(output, /pinned launcher command does not exist/);
+					assert.match(output, /codex plugin remove oh-my-codex@oh-my-codex-local --json/);
+				});
+			});
+		} finally {
 			await rm(wd, { recursive: true, force: true });
 		}
 	});
