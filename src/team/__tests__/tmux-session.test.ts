@@ -4426,16 +4426,39 @@ esac
     });
   });
 
-  it('enforces deadline after final poll completion (Codex finding 4310432469)', () => {
-    // Test that even if the final poll returns true (ready),
-    // we recheck the deadline and return false if we've exceeded it.
-    // This is a synchronous test with a very short timeout to simulate deadline exceeded.
-    withEmptyPath(() => {
-      const result = waitForWorkerReady('omx-team-x', 1, 1);
-      // With timeout=1ms, it's very likely the final poll will be after deadline.
-      // The key is that we return false, not true, even if a poll would succeed.
-      assert.equal(result, false, "waitForWorkerReady should return false if final poll completes after deadline");
-    });
+  it('enforces deadline on every poll including when ready (Codex finding 4310966027)', async () => {
+    // Test that even if a poll returns true (ready), we recheck the deadline.
+    // Mock tmux to return ready after a delay that causes us to exceed the timeout.
+    const delaySeconds = 0.15;
+    const timeoutMs = 100;
+    // With a timeout shorter than the delay, the poll will complete after deadline
+    // and should return false despite the ready output.
+    await withMockTmuxFixture(
+      'omx-worker-ready-deadline-enforce-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    # Simulate slow capture-pane that takes longer than the remaining timeout
+    sleep ${delaySeconds}
+    cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac`,
+      async () => {
+        // Poll with a very short timeout that will be exceeded during the capture
+        const result = waitForWorkerReady('omx-team-x', 1, timeoutMs);
+        // Even though capture-pane returns ready, the deadline was exceeded
+        // so we should return false
+        assert.equal(result, false, "waitForWorkerReady should return false when poll completes after deadline");
+      },
+    );
   });
 });
 
@@ -4750,16 +4773,39 @@ esac
     });
   });
 
-  it('enforces deadline after final poll completion (Codex finding 4310432469)', async () => {
-    // Test that even if the final poll returns true (ready),
-    // we recheck the deadline and return false if we've exceeded it.
-    // This is an async test with a very short timeout to simulate deadline exceeded.
-    await withEmptyPath(async () => {
-      const result = await waitForWorkerReadyAsync('omx-team-x', 1, 1);
-      // With timeout=1ms, it's very likely the final poll will be after deadline.
-      // The key is that we return false, not true, even if a poll would succeed.
-      assert.equal(result, false, "waitForWorkerReadyAsync should return false if final poll completes after deadline");
-    });
+  it('enforces deadline on every poll including when ready (Codex finding 4310966027)', async () => {
+    // Test that even if a poll returns true (ready), we recheck the deadline.
+    // Mock tmux to return ready after a delay that causes us to exceed the timeout.
+    const delaySeconds = 0.15;
+    const timeoutMs = 100;
+    // With a timeout shorter than the delay, the poll will complete after deadline
+    // and should return false despite the ready output.
+    await withMockTmuxFixture(
+      'omx-worker-ready-deadline-enforce-async-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    # Simulate slow capture-pane that takes longer than the remaining timeout
+    sleep ${delaySeconds}
+    cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac`,
+      async () => {
+        // Poll with a very short timeout that will be exceeded during the capture
+        const result = await waitForWorkerReadyAsync('omx-team-x', 1, timeoutMs);
+        // Even though capture-pane returns ready, the deadline was exceeded
+        // so we should return false
+        assert.equal(result, false, "waitForWorkerReadyAsync should return false when poll completes after deadline");
+      },
+    );
   });
 });
 
