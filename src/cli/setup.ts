@@ -4792,7 +4792,10 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			console.log("  Local Codex plugin cache already exposes packaged OMX skills.");
 		} else if (pluginCacheMaterialize.status === "stale-launcher") {
 			console.log(
-				`  warning: local Codex plugin cache at ${pluginCacheMaterialize.cacheDir} is not safe to use as current (${pluginCacheMaterialize.reason}); not reporting as current.`,
+				`  warning: local Codex plugin cache at ${pluginCacheMaterialize.cacheDir} has incompatible launcher provenance (${pluginCacheMaterialize.reason}); not reporting as current.`,
+			);
+			console.log(
+				`  Run \`codex plugin remove ${OMX_PLUGIN_NAME}@${OMX_LOCAL_MARKETPLACE_NAME} --json\` then rerun \`omx setup --plugin\` to rebuild the snapshot for ${preflightMarketplace?.packageRoot ?? pkgRoot}.`,
 			);
 		}
 		if (
