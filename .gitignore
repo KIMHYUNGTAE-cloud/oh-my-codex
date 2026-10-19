@@ -42,3 +42,7 @@ snapshot.json
 .codex/skills/.system/**
 !.codex/prompts/
 !.codex/prompts/**
+
+# gjc runtime session state (never commit)
+.gjc/_session-*/
+.gjc/state/
