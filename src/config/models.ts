@@ -305,6 +305,41 @@ export function isModelConfiguredAtRoot(codexHomeOverride?: string): boolean {
   return !!getCodexConfigRootModel(codexHomeOverride);
 }
 
+/**
+ * Resolve the effective configured model, considering profile-specific overrides.
+ * If a profile is active, profile-specific model takes precedence.
+ * Falls back to root-level model if no profile is set or profile has no override.
+ * Returns undefined if no model is configured at either level.
+ */
+export function getCodexConfigEffectiveModel(codexHomeOverride?: string): string | undefined {
+  const config = readCodexConfigFile(codexHomeOverride);
+  if (!config) return undefined;
+
+  const activeProfile = normalizeConfiguredValue(config.profile);
+  if (activeProfile) {
+    const profiles = config.profiles;
+    if (profiles && typeof profiles === 'object' && !Array.isArray(profiles)) {
+      const profileConfig = profiles[activeProfile];
+      if (profileConfig && typeof profileConfig === 'object' && !Array.isArray(profileConfig)) {
+        const profileModel = normalizeConfiguredValue(profileConfig.model);
+        if (profileModel) {
+          return profileModel;
+        }
+      }
+    }
+  }
+
+  return normalizeConfiguredValue(config.model);
+}
+
+/**
+ * Check if a model is configured either at root or in an active profile.
+ * Used to determine if exactModel pins should be baked for built-in providers.
+ */
+export function isModelConfigured(codexHomeOverride?: string): boolean {
+  return !!getCodexConfigEffectiveModel(codexHomeOverride);
+}
+
 export function getCodexConfigRootModelProvider(codexHomeOverride?: string): string | undefined {
   return normalizeConfiguredValue(readCodexConfigFile(codexHomeOverride)?.model_provider);
 }

@@ -20,6 +20,7 @@ import {
   getCodexConfigEffectiveModelProvider,
   isBuiltinProvider,
   isModelConfiguredAtRoot,
+  isModelConfigured,
   type PerAgentReasoningEffort,
 } from "../config/models.js";
 import { getRootModelName } from "../config/generator.js";
@@ -365,17 +366,19 @@ export function generateAgentToml(
   const reasoningOverride = getAgentReasoningOverride(agent.name, options.codexHomeOverride);
   const effectiveProvider = getCodexConfigEffectiveModelProvider(options.codexHomeOverride);
   const isBuiltin = isBuiltinProvider(effectiveProvider);
-  const hasConfiguredModel = isModelConfiguredAtRoot(options.codexHomeOverride);
+  const hasConfiguredModel = isModelConfigured(options.codexHomeOverride);
   // Only bake exactModel pin when using a built-in provider and a model is configured.
   // When a custom/third-party provider is configured, agents should inherit the model from config.toml
   // at runtime instead, allowing them to work with models available in that provider.
-  // Also suppress exact pins when no model is configured at root (even if a built-in provider is used).
+  // Also suppress exact pins when no model is configured (at root or in an active profile).
   const shouldBakeExactModel = !!agent.exactModel && isBuiltin && (hasConfiguredModel || !effectiveProvider);
   const hasAgentModelOverride = !!getAgentModelOverride(agent.name, options.codexHomeOverride);
   
-  // Suppress exact model overlay when the provider is custom without a configured model.
-  // In this case, the agent will inherit from the provider at runtime.
-  const suppressOverlay = !isBuiltin && !hasConfiguredModel;
+  // Suppress exact model overlay only when the provider is custom, no root model is configured,
+  // AND there is no per-agent override. When there's an explicit override, keep the overlay.
+  // Note: check root model only, not profile-scoped model, since profile models inherit at runtime.
+  const hasRootModel = isModelConfiguredAtRoot(options.codexHomeOverride);
+  const suppressOverlay = !isBuiltin && !hasRootModel && !hasAgentModelOverride;
 
   return generateStandaloneAgentToml({
     name: agent.name,
