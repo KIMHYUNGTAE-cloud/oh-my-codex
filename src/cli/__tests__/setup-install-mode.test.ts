@@ -1570,7 +1570,30 @@ describe("omx setup install mode behavior", () => {
 	}
 });
 
+	it("asserts removalSafe field values for cache repair outcomes", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-removalSafe-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
+					assert.ok(packagedMarketplace);
 
+					// Test 1: untrusted/symlink cache - removalSafe should be false
+					const cacheBaseDir = await packagedPluginCacheDir(codexHomeDir);
+					await mkdir(dirname(cacheBaseDir), { recursive: true });
+					const externalCacheDir = join(wd, "external-cache");
+					await mkdir(externalCacheDir, { recursive: true });
+					await symlink(externalCacheDir, cacheBaseDir);
+					const untrustedResult = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
+					assert.equal(untrustedResult.status, "stale-launcher");
+					assert.match(untrustedResult.reason ?? "", /symlink or non-directory entry/);
+					assert.equal(untrustedResult.removalSafe, false, "untrusted symlink should have removalSafe=false");
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
 
 	it("rejects scoped plugin-cache repair outside plugin setup mode", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-plugin-cache-mode-"));
