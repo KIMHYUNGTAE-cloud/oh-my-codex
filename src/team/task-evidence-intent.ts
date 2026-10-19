@@ -17,7 +17,7 @@ function normalizeClause(text: string): string {
 
 function evaluatesOptions(text: string): boolean {
   // Detect option lists - these are analytical and should preserve intent even with imperative-looking items
-  return ANALYSIS_PREFIX.test(text) && /\b(?:options?|alternatives?|candidates?|choices?|approaches?)\s*(?:\n|,|:|or)\b/i.test(text);
+  return ANALYSIS_PREFIX.test(text) && /\b(?:options?|alternatives?|candidates?|choices?|approaches?)\s*(?:\n|,|:|or)(?:\s|\b)/i.test(text);
 }
 
 function splitCommands(text: string, optionList = false): string[] {
@@ -128,6 +128,8 @@ export function inferTaskEvidenceIntent(...fields: string[]): { codeChangeReques
         const trimmed = part.trim();
         // Don't split analytical contexts or described actions
         if (describesActions(trimmed)) return [part];
+        // Don't split option evaluations at the colon separator
+        if (evaluatesOptions(trimmed)) return [part];
         // For non-analytical parts, split on connectors and punctuation
         return trimmed.split(/,|:(?![\\\/])|\b(?:and|then|also)\b/i);
       });
