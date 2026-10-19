@@ -1,10 +1,11 @@
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "fs";
 import { appendFile, lstat, mkdir, open, readFile, readdir, realpath, stat, unlink, writeFile } from "fs/promises";
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { createHash } from "crypto";
 
 import { fileURLToPath, pathToFileURL } from "url";
+import { promisify } from "util";
 import { readModeStateForActiveDecision, readModeStateForSession, updateModeState } from "../modes/base.js";
 import { redactAuthSecrets } from "../auth/redact.js";
 import {
@@ -26,6 +27,7 @@ import {
   readSubagentTrackingState,
   recordNativeSubagentAuthorityObservation,
   recordSubagentTurnForSession,
+  recordSubagentTurnForSessionPartitions,
   repairPersistedRootIdentity,
   quarantinePersistedRootAuthority,
   revokeNativeSubagentAuthorities,
@@ -50,6 +52,7 @@ import {
   resolveConductorPolicyRoot,
 } from "../team/worker-provenance.js";
 import { inferTerminalLifecycleOutcome } from "../runtime/run-outcome.js";
+import { registerOmxPluginCacheLivePin } from "../cli/plugin-marketplace.js";
 import { syncRegularFile } from "../utils/file-durability.js";
 import {
   appendPromptSessionProvenanceRejection,
@@ -149,6 +152,7 @@ import {
   onPreCompact as buildWikiPreCompactContext,
   onSessionStart as buildWikiSessionStartContext,
 } from "../wiki/lifecycle.js";
+import { sessionModelInstructionsPath } from "../hooks/agents-overlay.js";
 import { readAutoresearchCompletionStatus, readAutoresearchModeStateForActiveDecision } from "../autoresearch/skill-validation.js";
 import { deriveAutopilotChildPhase, normalizeAutopilotPhase } from "../autopilot/fsm.js";
 import {
@@ -208,6 +212,7 @@ type CodexHookEventName =
   | "UserPromptSubmit"
   | "PreCompact"
   | "PostCompact"
+  | "SubagentStop"
   | "Stop";
 
 type CodexHookPayload = Record<string, unknown>;
@@ -715,6 +720,7 @@ function readHookEventName(payload: CodexHookPayload): CodexHookEventName | null
     || raw === "UserPromptSubmit"
     || raw === "PreCompact"
     || raw === "PostCompact"
+    || raw === "SubagentStop"
     || raw === "Stop"
   ) {
     return raw;
@@ -746,6 +752,8 @@ export function mapCodexHookEventToOmxEvent(
       return "pre-compact";
     case "PostCompact":
       return "post-compact";
+    case "SubagentStop":
+      return "subagent-stop";
     case "Stop":
       return "stop";
     default:
@@ -880,9 +888,11 @@ function sanitizePayloadForHookContext(
     return sanitized;
   }
 
-  if (hookEventName === "Stop") {
+  if (hookEventName === "Stop" || hookEventName === "SubagentStop") {
     delete sanitized.stop_hook_active;
     delete sanitized.stopHookActive;
+  }
+  if (hookEventName === "Stop") {
     delete sanitized.sessionId;
     sanitized.session_id = canonicalSessionId.trim() || safeString(payload.session_id ?? payload.sessionId).trim();
   }
@@ -1551,6 +1561,36 @@ interface WindowsProcessRecord {
 
 const WINDOWS_PROCESS_TABLE_TIMEOUT_MS = 5_000;
 const WINDOWS_PROCESS_TABLE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+const WINDOWS_PROCESS_TABLE_QUERY = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,Name | ConvertTo-Json -Compress";
+const execFileAsync = promisify(execFile);
+
+function parseWindowsProcessLineage(output: string, startPid: number): ProcessLineageEntry[] | null {
+	const parsed = JSON.parse(output) as unknown;
+	const records = Array.isArray(parsed) ? parsed : [parsed];
+	const processTable = new Map<number, { parentPid: number | null; command: string; name: string }>();
+
+	for (const record of records) {
+		if (!record || typeof record !== "object") continue;
+		const processRecord = record as WindowsProcessRecord;
+		const pid = safePositiveInteger(processRecord.ProcessId);
+		const parentPid = safePositiveInteger(processRecord.ParentProcessId);
+		const command = safeString(processRecord.CommandLine).trim() || safeString(processRecord.Name).trim();
+		const name = safeString(processRecord.Name).trim();
+		if (pid === null || !command) continue;
+		processTable.set(pid, { parentPid, command, name });
+	}
+
+	const lineage: ProcessLineageEntry[] = [];
+	let currentPid = startPid;
+	for (let i = 0; i < 6 && currentPid > 1; i += 1) {
+		const current = processTable.get(currentPid);
+		if (!current) break;
+		lineage.push({ pid: currentPid, command: current.command, name: current.name });
+		if (!current.parentPid || current.parentPid === currentPid) break;
+		currentPid = current.parentPid;
+	}
+	return lineage.length > 0 ? lineage : null;
+}
 
 function readWindowsProcessLineage(startPid: number): ProcessLineageEntry[] | null {
   if (!Number.isInteger(startPid) || startPid <= 1) return null;
@@ -1564,7 +1604,7 @@ function readWindowsProcessLineage(startPid: number): ProcessLineageEntry[] | nu
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,Name | ConvertTo-Json -Compress",
+        WINDOWS_PROCESS_TABLE_QUERY,
       ],
       {
         encoding: "utf-8",
@@ -1573,35 +1613,37 @@ function readWindowsProcessLineage(startPid: number): ProcessLineageEntry[] | nu
         maxBuffer: WINDOWS_PROCESS_TABLE_MAX_BUFFER_BYTES,
       },
     );
-    const parsed = JSON.parse(output) as unknown;
-    const records = Array.isArray(parsed) ? parsed : [parsed];
-    const processTable = new Map<number, { parentPid: number | null; command: string; name: string }>();
-
-    for (const record of records) {
-      if (!record || typeof record !== "object") continue;
-      const processRecord = record as WindowsProcessRecord;
-      const pid = safePositiveInteger(processRecord.ProcessId);
-      const parentPid = safePositiveInteger(processRecord.ParentProcessId);
-      const command = safeString(processRecord.CommandLine).trim()
-        || safeString(processRecord.Name).trim();
-      const name = safeString(processRecord.Name).trim();
-      if (pid === null || !command) continue;
-      processTable.set(pid, { parentPid, command, name });
-    }
-
-    const lineage: ProcessLineageEntry[] = [];
-    let currentPid = startPid;
-    for (let i = 0; i < 6 && currentPid > 1; i += 1) {
-      const current = processTable.get(currentPid);
-      if (!current) break;
-      lineage.push({ pid: currentPid, command: current.command, name: current.name });
-      if (!current.parentPid || current.parentPid === currentPid) break;
-      currentPid = current.parentPid;
-    }
-    return lineage.length > 0 ? lineage : null;
+    return parseWindowsProcessLineage(output, startPid);
   } catch {
     return null;
   }
+}
+
+async function readWindowsProcessLineageAsync(startPid: number): Promise<ProcessLineageEntry[] | null> {
+	if (!Number.isInteger(startPid) || startPid <= 1) return null;
+
+	try {
+		const { stdout } = await execFileAsync(
+			"powershell.exe",
+			[
+				"-NoProfile",
+				"-NonInteractive",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				WINDOWS_PROCESS_TABLE_QUERY,
+			],
+			{
+				encoding: "utf-8",
+				windowsHide: true,
+				timeout: WINDOWS_PROCESS_TABLE_TIMEOUT_MS,
+				maxBuffer: WINDOWS_PROCESS_TABLE_MAX_BUFFER_BYTES,
+			},
+		);
+		return parseWindowsProcessLineage(String(stdout), startPid);
+	} catch {
+		return null;
+	}
 }
 
 function looksLikeShellCommand(command: string): boolean {
@@ -1623,6 +1665,7 @@ function looksLikeCodexProcess(entry: ProcessLineageEntry): boolean {
 export function resolveSessionOwnerPidFromAncestry(
   startPid: number,
   options: {
+    requireCodexAncestor?: boolean;
     readParentPid?: (pid: number) => number | null;
     readProcessCommand?: (pid: number) => string;
     readProcessLineage?: (pid: number) => ProcessLineageEntry[] | null;
@@ -1651,6 +1694,7 @@ export function resolveSessionOwnerPidFromAncestry(
 
   const codexAncestor = lineage.find(looksLikeCodexProcess);
   if (codexAncestor) return codexAncestor.pid;
+  if (options.requireCodexAncestor) return null;
 
   if (lineage.length >= 2 && looksLikeShellCommand(lineage[0]?.command || "")) {
     return lineage[1].pid;
@@ -1660,7 +1704,15 @@ export function resolveSessionOwnerPidFromAncestry(
   return null;
 }
 
-function resolveSessionOwnerPid(payload: CodexHookPayload): number {
+function resolveSessionOwnerPid(payload: CodexHookPayload): number;
+function resolveSessionOwnerPid(
+  payload: CodexHookPayload,
+  options: { requireCodexAncestor: true },
+): number | null;
+function resolveSessionOwnerPid(
+  payload: CodexHookPayload,
+  options: { requireCodexAncestor?: boolean } = {},
+): number | null {
   const explicitPid = [
     payload.session_pid,
     payload.sessionPid,
@@ -1673,9 +1725,29 @@ function resolveSessionOwnerPid(payload: CodexHookPayload): number {
     .find((value): value is number => value !== null);
   if (explicitPid) return explicitPid;
 
-  const resolved = resolveSessionOwnerPidFromAncestry(process.ppid);
+  const resolved = resolveSessionOwnerPidFromAncestry(process.ppid, options);
   if (resolved) return resolved;
-  return process.pid;
+  return options.requireCodexAncestor ? null : process.pid;
+}
+
+async function resolveSessionOwnerPidForPin(payload: CodexHookPayload): Promise<number | null> {
+  const explicitPid = [
+    payload.session_pid,
+    payload.sessionPid,
+    payload.codex_pid,
+    payload.codexPid,
+    payload.parent_pid,
+    payload.parentPid,
+  ]
+    .map(safePositiveInteger)
+    .find((value): value is number => value !== null);
+  if (explicitPid) return explicitPid;
+
+  if (process.platform === "win32") {
+    const lineage = await readWindowsProcessLineageAsync(process.ppid);
+    return lineage?.find(looksLikeCodexProcess)?.pid ?? null;
+  }
+  return resolveSessionOwnerPidFromAncestry(process.ppid, { requireCodexAncestor: true });
 }
 
 function tryReadGitValue(cwd: string, args: string[]): string | null {
@@ -2266,6 +2338,22 @@ async function buildSessionStartContext(
 ): Promise<string | null> {
   const sections: string[] = [];
 
+  let startupInstructions = "";
+  const startupFile = process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE;
+  if (readSessionStartSource(options.payload) === "startup" && startupFile
+    && resolve(startupFile) === sessionModelInstructionsPath(cwd, sessionId)) {
+    try {
+      startupInstructions = await readFile(startupFile, "utf-8");
+    } catch {
+      // Missing launch evidence must preserve hook-delivered memory.
+    }
+  }
+  const startupMemory = startupInstructions.match(/(?:^|\n)\*\*Project Context:\*\*\r?\n([\s\S]*?)(?=\r?\n\r?\n|$)/)?.[1] ?? "";
+  const alreadyInStartupInstructions = (label: string, value: string): boolean =>
+    startupMemory.split(/\r?\n/).some(line => line.trim().replace(/\s+/g, " ") === `- ${label}: ${value}`);
+  const startupPriority = startupInstructions.match(/(?:^|\n)\*\*Priority Notes:\*\*\r?\n([\s\S]*?)(?=\r?\n\r?\n|$)/)?.[1]
+    .replace(/\s+/g, " ").trim();
+
   sections.push(buildExecutionEnvironmentSection(cwd, {
     hookEventName: options.hookEventName,
     payload: options.payload,
@@ -2310,13 +2398,13 @@ async function buildSessionStartContext(
     const summary: string[] = [];
     const relativeMemoryPath = relative(cwd, projectMemoryPath).replace(/\\/g, "/");
     summary.push(`- source: ${relativeMemoryPath === "project-memory.json" ? "project-memory.json" : ".omx/project-memory.json"}`);
-    if (techStack) summary.push(`- stack: ${techStack}`);
-    if (conventions) summary.push(`- conventions: ${conventions}`);
-    if (build) summary.push(`- build: ${build}`);
+    if (techStack && !alreadyInStartupInstructions("Stack", techStack)) summary.push(`- stack: ${techStack}`);
+    if (conventions && !alreadyInStartupInstructions("Conventions", conventions)) summary.push(`- conventions: ${conventions}`);
+    if (build && !alreadyInStartupInstructions("Build", build)) summary.push(`- build: ${build}`);
     if (directives.length > 0) {
       const firstDirective = directives[0] as Record<string, unknown>;
       const directive = safeContextSnippet(firstDirective.directive);
-      if (directive) summary.push(`- directive: ${directive}`);
+      if (directive && !alreadyInStartupInstructions("Directive", directive)) summary.push(`- directive: ${directive}`);
     }
     if (notes.length > 0) {
       const firstNote = notes[0] as Record<string, unknown>;
@@ -2344,7 +2432,7 @@ async function buildSessionStartContext(
           .map((line) => line.trim())
           .filter(Boolean)
           .join(" ");
-        if (section) {
+        if (section && startupPriority !== section.replace(/\s+/g, " ")) {
           sections.push(`[Priority notes]\n- ${section.slice(0, 220)}`);
         }
       }
@@ -21841,6 +21929,72 @@ export async function dispatchCodexNativeHook(
   const cwd = options.cwd ?? (safeString(payload.cwd).trim() || process.cwd());
   const reconcileAdvisory = options.reconcileRalplanAdvisoryFn ?? reconcileRalplanAdvisory;
   const omxEventName = mapCodexHookEventToOmxEvent(hookEventName);
+  if (hookEventName === "SubagentStop") {
+    // This event names the parent session and child agent separately; it is not a leader Stop.
+    const parentSessionId = readStrictStopPayloadSessionId(payload);
+    const agentId = normalizeSessionId(safeString(payload.agent_id).trim());
+    let sessionId: string | null = null;
+    let pluginDiscoveryCwd: string | undefined;
+    if (parentSessionId && agentId && agentId !== parentSessionId) {
+      const authoritativeTeamWorker = hasRawTeamWorkerDeclaration()
+        ? await resolveAuthoritativeTeamWorkerContext(cwd)
+        : null;
+      if (authoritativeTeamWorker) {
+        // Team workers can own child agents without the shared leader pointer or tracker summary.
+        sessionId = parentSessionId;
+        pluginDiscoveryCwd = authoritativeTeamWorker.canonicalLeaderCwd;
+      } else {
+        const pointer = await readSessionPointer(resolveSessionPointerContext(cwd));
+        if (pointer.status === "usable" && pointer.state && !sessionPointerAliases(pointer.state).has(agentId)) {
+          const candidateSessionId = pointer.state.session_id;
+          const summary = await readSubagentSessionSummary(cwd, candidateSessionId);
+          if (payloadMatchesSessionPointer(parentSessionId, pointer.state)
+            || summary?.allThreadIds.includes(parentSessionId)) {
+            sessionId = candidateSessionId;
+          }
+        }
+      }
+    }
+    if (sessionId && agentId) {
+      try {
+        await recordSubagentTurnForSessionPartitions(cwd, {
+          sessionId,
+          threadId: agentId,
+          turnId: readPayloadTurnId(payload) || undefined,
+          kind: "subagent",
+          mode: safeString(payload.agent_type).trim() || undefined,
+          completed: true,
+          completionSource: "native_stop_event",
+        });
+      } catch (error) {
+        await logNativeHookCliError(cwd, "native_subagent_completion_tracking_error", error, payload, { agent_id: agentId });
+        return { hookEventName, omxEventName, skillState: null, outputJson: null };
+      }
+      if (!shouldSuppressSubagentLifecycleHookDispatch()) {
+        try {
+          await dispatchHookEventRuntime({
+            event: buildNativeHookEvent(omxEventName!, {
+              ...buildBaseContext(cwd, payload, hookEventName, sessionId),
+              native_session_id: agentId,
+              codex_session_id: agentId,
+              omx_session_id: sessionId,
+            }, {
+              session_id: sessionId,
+              thread_id: agentId,
+              turn_id: readPayloadTurnId(payload) || undefined,
+              mode: safeString(payload.agent_type).trim() || undefined,
+            }),
+            cwd,
+            ...(pluginDiscoveryCwd ? { pluginDiscoveryCwd } : {}),
+            allowTeamWorkerSideEffects: false,
+          });
+        } catch (error) {
+          await logNativeHookCliError(cwd, "native_subagent_completion_dispatch_error", error, payload, { agent_id: agentId });
+        }
+      }
+    }
+    return { hookEventName, omxEventName, skillState: null, outputJson: null };
+  }
   // #3497 / C1 boundary: documented-leader PreToolUse hard gate removed.
   if (hookEventName === "PreToolUse" && safeString(payload.tool_name).trim() === "Bash") {
     void payload;
@@ -21992,7 +22146,26 @@ export async function dispatchCodexNativeHook(
       // never promote itself into a root/leader session or emit an independent
       // session-start notification at session/minimal verbosity.
       isSubagentSessionStart = true;
-      if (canonicalSessionId) {
+      if (authoritativeTeamWorker && authoritativeWorkerPayloadSessionId === nativeSessionId) {
+        // A Team worker shares the leader pointer but owns its native child tree.
+        // Retain descriptive child records under the transcript's immediate parent
+        // without letting this child inherit the leader's session scope.
+        canonicalSessionId = "";
+        resolvedNativeSessionId = nativeSessionId;
+        skipCanonicalSessionStartContext = true;
+        allowImplicitSessionSideEffects = false;
+        recordedNativeSubagentSessionStart = true;
+        await recordNativeSubagentSessionStart(
+          cwd,
+          subagentSessionStart.parentThreadId,
+          nativeSessionId,
+          subagentSessionStart,
+          transcriptPath,
+          "",
+          "absent",
+          implicatedChildThreadIds,
+        );
+      } else if (canonicalSessionId) {
         const belongsToCanonicalSession = await nativeSubagentSessionStartBelongsToCanonicalSession(
           cwd,
           canonicalSessionId,
@@ -22521,6 +22694,7 @@ export async function dispatchCodexNativeHook(
     && /^[ \t]*omx[ \t]+cancel\b/.test(readPreToolUseCommand(payload));
   if (omxEventName && !bypassGenericPreToolUsePluginDispatch && allowImplicitSessionSideEffects && allowGlobalSideEffects && !skipCanonicalSessionStartContext && !suppressNoisySubagentLifecycleDispatch) {
     const baseContext = buildBaseContext(cwd, payload, hookEventName!, canonicalSessionId);
+    if (isSubagentStop) baseContext.is_subagent_stop = true;
     if (resolvedNativeSessionId) {
       baseContext.native_session_id = resolvedNativeSessionId;
       baseContext.codex_session_id = resolvedNativeSessionId;
@@ -22541,6 +22715,7 @@ export async function dispatchCodexNativeHook(
     await dispatchHookEventRuntime({
       event,
       cwd,
+      pluginDiscoveryCwd: authoritativeTeamWorkerEvidence?.canonicalLeaderCwd,
       allowTeamWorkerSideEffects: false,
     });
   }
@@ -22688,6 +22863,7 @@ export async function dispatchCodexNativeHook(
           await recordSubagentTurnForSession(cwd, {
             sessionId: canonicalSessionId.trim(),
             threadId: threadId.trim(),
+            turnId: readPayloadTurnId(payload) || undefined,
             completed: true,
             completionSource: 'native_stop_event',
             timestamp: new Date().toISOString(),
@@ -22801,8 +22977,12 @@ async function readStdinJson(): Promise<NativeHookCliReadResult> {
   }
 }
 
-function inferHookEventNameFromMalformedInput(raw: string): CodexHookEventName | null {
-  const match = raw.match(/(?:\"|['"])?hook[_-]?event[_-]?name(?:\"|['"])?\s*:\s*(?:\"|['"])?(SessionStart|PreToolUse|PostToolUse|UserPromptSubmit|PreCompact|PostCompact|Stop)\b/i);
+function inferHookEventNameFromMalformedInput(
+  raw: string,
+  rawHookEventName?: CodexHookEventName | null,
+): CodexHookEventName | null {
+  if (rawHookEventName) return rawHookEventName;
+  const match = raw.match(/(?:\"|['"])?hook[_-]?event[_-]?name(?:\"|['"])?\s*:\s*(?:\"|['"])?(SessionStart|PreToolUse|PostToolUse|UserPromptSubmit|PreCompact|PostCompact|SubagentStop|Stop)\b/i);
   const value = match?.[1];
   if (!value) return null;
   return readHookEventName({ hook_event_name: value });
@@ -22823,15 +23003,17 @@ function buildMalformedStdinHookOutput(
   parseError: Error,
   rawInput: string,
   cwd = process.cwd(),
+  rawHookEventName?: CodexHookEventName | null,
 ): Record<string, unknown> {
   const reason =
     "OMX native hook received malformed JSON input. Preserve runtime state, inspect the emitting hook payload yourself, and retry with valid JSON.";
   const systemMessage =
     `${reason} stdin JSON parsing failed inside codex-native-hook: ${parseError.message}.`;
-  const inferredHookEventName = inferHookEventNameFromMalformedInput(rawInput);
+  const inferredHookEventName = inferHookEventNameFromMalformedInput(rawInput, rawHookEventName);
   if (inferredHookEventName === "PreToolUse") {
     return buildUnparseablePreToolUseDenyOutput(reason, systemMessage);
   }
+  if (inferredHookEventName === "SubagentStop") return {};
   if (inferredHookEventName === "Stop" || (!inferredHookEventName && hasNativeStopRuntimeSurface(cwd))) {
     return {
       decision: "block",
@@ -22880,6 +23062,7 @@ async function buildOversizedStdinHookOutput(
 ): Promise<Record<string, unknown>> {
   const systemMessage =
     `OMX native hook rejected oversized stdin JSON before parsing; maxBytes=${MAX_NATIVE_STDIN_JSON_BYTES}.`;
+  if (rawHookEventName === "SubagentStop") return {};
   if (rawHookEventName === "PreToolUse") {
     return buildUnparseablePreToolUseDenyOutput(systemMessage, systemMessage);
   }
@@ -22993,7 +23176,36 @@ export async function runCodexNativeHookCli(): Promise<void> {
       {},
       buildRawInputLogFields(rawInput),
     );
-    writeNativeHookJsonStdout(buildMalformedStdinHookOutput(parseError, rawInput, process.cwd()));
+    writeNativeHookJsonStdout(buildMalformedStdinHookOutput(parseError, rawInput, process.cwd(), rawHookEventName));
+    return;
+  }
+
+  const pluginCachePinOnly = process.argv.includes("--plugin-cache-pin-only");
+  const pluginRoot = safeString(process.env.OMX_PLUGIN_ROOT).trim();
+  const sessionId = readPayloadSessionId(payload);
+  const pluginCachePinPending = process.env.OMX_PLUGIN_CACHE_PIN_PENDING === "1";
+  const pluginCachePinRequired = process.env.OMX_PLUGIN_CACHE_PIN_REQUIRED === "1";
+  let pluginCachePinRegistered = false;
+  if (pluginRoot && sessionId && (pluginCachePinOnly || pluginCachePinPending)) {
+    const ownerPid = await resolveSessionOwnerPidForPin(payload);
+    if (ownerPid) {
+      try {
+        pluginCachePinRegistered = await registerOmxPluginCacheLivePin(pluginRoot, sessionId, ownerPid);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`[oh-my-codex] unable to record live plugin cache pin: ${detail}`);
+      }
+    }
+  }
+  if (pluginCachePinOnly) {
+    writeNativeHookJsonStdout({});
+    if (!pluginCachePinRegistered) process.exitCode = 1;
+    return;
+  }
+  if (pluginCachePinRequired && !pluginCachePinRegistered) {
+    console.error("[oh-my-codex] refusing hook delegation because the active plugin cache session could not be pinned");
+    writeNativeHookJsonStdout({});
+    process.exitCode = 1;
     return;
   }
 

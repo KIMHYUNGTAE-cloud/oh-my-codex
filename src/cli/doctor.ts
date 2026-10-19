@@ -92,6 +92,7 @@ import {
 	OMX_LOCAL_MARKETPLACE_NAME,
 	OMX_LOCAL_PLUGIN_CONFIG_KEY,
 	PLUGIN_LAUNCHER_RECOVERY_HINT,
+	getUntrustedOmxPluginCacheRecoveryHint,
 	discoverOmxPluginCacheDirs,
 	expectedPackagedOmxSkillNames,
 	getPinnedLauncherIncompatibilityReason,
@@ -2527,6 +2528,7 @@ const MANAGED_HOOK_TRUST_KEY_LABELS: Record<
 	UserPromptSubmit: "user_prompt_submit",
 	PreCompact: "pre_compact",
 	PostCompact: "post_compact",
+	SubagentStop: "subagent_stop",
 	Stop: "stop",
 };
 
@@ -2565,6 +2567,21 @@ function pluginHooksJsonHasNativeCoverage(content: string): boolean | null {
 	}
 }
 
+async function getUntrustedOmxPluginCacheEntryKind(cacheDir: string): Promise<"a symlink" | "a non-directory entry" | null> {
+	try {
+		const stats = await lstat(cacheDir);
+		if (stats.isSymbolicLink()) return "a symlink";
+		if (!stats.isDirectory()) return "a non-directory entry";
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+	}
+	return null;
+}
+
+function untrustedOmxPluginCacheRecoveryMessage(cacheDir: string, entryKind: "a symlink" | "a non-directory entry"): string {
+	return `expected plugin cache path ${cacheDir} is ${entryKind}; automatic repair preserves unverified content; ${getUntrustedOmxPluginCacheRecoveryHint(cacheDir)}`;
+}
+
 async function checkPluginScopedNativeHooks(
 	codexHomeDir: string,
 	setupHooksPath: string,
@@ -2589,6 +2606,14 @@ async function checkPluginScopedNativeHooks(
 	const expectedHooksPath = join(expectedCacheDir, "hooks", "hooks.json");
 	const expectedHookLauncherPath = join(expectedCacheDir, "hooks", "codex-native-hook.mjs");
 	const expectedPinnedLauncherPath = join(expectedCacheDir, "hooks", "omx-command.json");
+	const untrustedCacheEntryKind = await getUntrustedOmxPluginCacheEntryKind(expectedCacheDir);
+	if (untrustedCacheEntryKind) {
+		return {
+			name: "Native hooks",
+			status: "warn",
+			message: `plugin-scoped hooks are enabled, but ${untrustedOmxPluginCacheRecoveryMessage(expectedCacheDir, untrustedCacheEntryKind)}`,
+		};
+	}
 	const state = await readOmxPluginCacheState(expectedCacheDir);
 
 	if (!state) {
@@ -2599,7 +2624,7 @@ async function checkPluginScopedNativeHooks(
 					name: "Native hooks",
 					status: "warn",
 					message:
-						`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\``,
+						`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\``,
 				};
 			}
 		}
@@ -2607,7 +2632,7 @@ async function checkPluginScopedNativeHooks(
 			name: "Native hooks",
 			status: "warn",
 			message:
-				`plugin-scoped hooks are enabled, but the expected Codex plugin cache manifest is missing at ${join(expectedCacheDir, ".codex-plugin", "plugin.json")}; ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+				`plugin-scoped hooks are enabled, but the expected Codex plugin cache manifest is missing at ${join(expectedCacheDir, ".codex-plugin", "plugin.json")}; ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 		};
 	}
 
@@ -2616,7 +2641,7 @@ async function checkPluginScopedNativeHooks(
 			name: "Native hooks",
 			status: "warn",
 			message:
-				`plugin-scoped hooks are enabled, but the Codex plugin cache manifest points hooks to ${String(state.hooksPointer)} instead of ./hooks/hooks.json at ${expectedHooksPath}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+				`plugin-scoped hooks are enabled, but the Codex plugin cache manifest points hooks to ${String(state.hooksPointer)} instead of ./hooks/hooks.json at ${expectedHooksPath}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 		};
 	}
 
@@ -2629,7 +2654,7 @@ async function checkPluginScopedNativeHooks(
 						name: "Native hooks",
 						status: "warn",
 						message:
-							`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\``,
+							`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\``,
 					};
 				}
 			}
@@ -2637,7 +2662,7 @@ async function checkPluginScopedNativeHooks(
 				name: "Native hooks",
 				status: "warn",
 				message:
-					`plugin-scoped hooks are enabled, but expected plugin hook file is missing at ${expectedPath}; ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+					`plugin-scoped hooks are enabled, but expected plugin hook file is missing at ${expectedPath}; ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 			};
 		}
 	}
@@ -2649,14 +2674,14 @@ async function checkPluginScopedNativeHooks(
 				name: "Native hooks",
 				status: "warn",
 				message:
-					`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\``,
+					`plugin-scoped hooks are enabled, but cached launcher in ${expectedCacheDir} is incompatible (${launcherIncompat.reason}); ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\``,
 			};
 		}
 		return {
 			name: "Native hooks",
 			status: "warn",
 			message:
-				`plugin-scoped hooks are enabled, but cached plugin hook files or pinned hook launcher in ${expectedCacheDir} do not match the packaged plugin; ${setupHooksPathDescription}; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+				`plugin-scoped hooks are enabled, but cached plugin hook files or pinned hook launcher in ${expectedCacheDir} do not match the packaged plugin; ${setupHooksPathDescription}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 		};
 	}
 
@@ -2684,7 +2709,7 @@ async function checkPluginScopedNativeHooks(
 			name: "Native hooks",
 			status: "warn",
 			message:
-				`plugin-scoped hooks.json at ${expectedHooksPath} is missing OMX native coverage for one or more events; run \`codex plugin remove ${OMX_LOCAL_PLUGIN_CONFIG_KEY} --json\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+				`plugin-scoped hooks.json at ${expectedHooksPath} is missing OMX native coverage for one or more events; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 		};
 	}
 
@@ -3650,6 +3675,14 @@ async function checkPluginMarketplaceRegistration(
 			"oh-my-codex",
 			packagedManifestVersion,
 		);
+		const untrustedCacheEntryKind = await getUntrustedOmxPluginCacheEntryKind(expectedCacheDir);
+		if (untrustedCacheEntryKind) {
+			return {
+				name: "Skills",
+				status: "warn",
+				message: `plugin marketplace ${OMX_LOCAL_MARKETPLACE_NAME} has ${untrustedOmxPluginCacheRecoveryMessage(expectedCacheDir, untrustedCacheEntryKind)} so /skills can discover OMX plugin skills`,
+			};
+		}
 		if (existsSync(expectedCacheDir)) {
 			const provenanceReason = await omxPluginCacheProvenanceReason(
 				expectedCacheDir,
@@ -3660,7 +3693,7 @@ async function checkPluginMarketplaceRegistration(
 				return {
 					name: "Skills",
 					status: "warn",
-					message: `plugin marketplace ${OMX_LOCAL_MARKETPLACE_NAME} cache provenance is invalid: ${provenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} then rerun "omx setup --plugin" so /skills can discover OMX plugin skills`,
+					message: `plugin marketplace ${OMX_LOCAL_MARKETPLACE_NAME} cache provenance is invalid: ${provenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} so /skills can discover OMX plugin skills`,
 				};
 			}
 		}
@@ -3694,7 +3727,7 @@ async function checkPluginMarketplaceRegistration(
 			return {
 				name: "Skills",
 				status: "warn",
-				message: `plugin marketplace ${OMX_LOCAL_MARKETPLACE_NAME} is registered, but ${detail}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} then rerun "omx setup --plugin" so /skills can discover OMX plugin skills`,
+				message: `plugin marketplace ${OMX_LOCAL_MARKETPLACE_NAME} is registered, but ${detail}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} so /skills can discover OMX plugin skills`,
 			};
 		}
 
@@ -3768,6 +3801,14 @@ async function checkPluginVersionDiagnostics(
 		"oh-my-codex",
 		manifestVersion,
 	);
+	const untrustedCacheEntryKind = await getUntrustedOmxPluginCacheEntryKind(cacheDir);
+	if (untrustedCacheEntryKind) {
+		return {
+			name: "Plugin versions",
+			status: "warn",
+			message: untrustedOmxPluginCacheRecoveryMessage(cacheDir, untrustedCacheEntryKind),
+		};
+	}
 	if (existsSync(cacheDir)) {
 		const provenanceReason = await omxPluginCacheProvenanceReason(
 			cacheDir,
@@ -3778,7 +3819,7 @@ async function checkPluginVersionDiagnostics(
 			return {
 				name: "Plugin versions",
 				status: "warn",
-				message: `expected cache directory ${cacheDir} has invalid plugin cache provenance: ${provenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} then rerun "omx setup --plugin" to refresh the plugin cache`,
+				message: `expected cache directory ${cacheDir} has invalid plugin cache provenance: ${provenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT} to refresh the plugin cache`,
 			};
 		}
 	}
@@ -3787,7 +3828,7 @@ async function checkPluginVersionDiagnostics(
 		return {
 			name: "Plugin versions",
 			status: "warn",
-			message: `expected cache directory ${cacheDir} is not materialized with packaged plugin manifest version ${manifestVersion}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` then rerun \`omx setup --plugin\` to refresh the plugin cache`,
+			message: `expected cache directory ${cacheDir} is not materialized with packaged plugin manifest version ${manifestVersion}; run \`${PLUGIN_LAUNCHER_RECOVERY_HINT}\` to refresh the plugin cache`,
 		};
 	}
 	if (stamp?.install_channel === "dev") {
@@ -4015,13 +4056,22 @@ export function checkSparkRouting(paths: DoctorPaths): Check {
 			);
 			continue;
 		}
+		const explicitOverride = explicitSparkAgentOverrides.get(agentName);
 		if (!info.model) {
+			// No model field in TOML: check if it's intentional runtime inheritance or stale
+			if (!explicitOverride) {
+				// No override configured -> agent will inherit from config.toml at runtime (intended behavior since 0.21.18)
+				wired.push(
+					`${agentName} -> \`${sparkModel}\` (runtime inheritance)${info.modelProvider ? ` (provider: ${info.modelProvider})` : ""}`,
+				);
+				continue;
+			}
+			// Explicit override configured but TOML has no model field -> stale
 			problems.push(
-				`${agentName}.toml has no model field (stale install; run \`omx setup --force\`)`,
+				`${agentName}.toml has no model field but agentModels.${agentName} explicitly resolves to \`${explicitOverride}\` (stale install; run \`omx setup --force\`)`,
 			);
 			continue;
 		}
-		const explicitOverride = explicitSparkAgentOverrides.get(agentName);
 		if (explicitOverride) {
 			if (info.model !== explicitOverride) {
 				problems.push(

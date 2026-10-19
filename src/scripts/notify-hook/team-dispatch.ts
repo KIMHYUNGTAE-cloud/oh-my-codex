@@ -1,12 +1,14 @@
 // @ts-nocheck
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { appendFileSync, existsSync, mkdirSync } from 'fs';
-import { execFileSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { safeString } from './utils.js';
-import { resolveBridgeStateDir, resolveRuntimeBinaryPath } from '../../runtime/bridge.js';
+import { getDefaultBridge, isRuntimeTransportError, preflightRuntimeBridge, resolveBridgeStateDir, RuntimeBridgeError } from '../../runtime/bridge.js';
+import { hasRuntimeAuthority, hasRuntimeDispatchIdentity, recordRuntimeFinalization, reconcileRuntimeFinalizations } from '../../team/state/dispatch-recovery.js';
 import { appendTeamDeliveryLog } from '../../team/delivery-log.js';
+import { hasUniqueScopedMailboxMatch, mailboxMessageContentMatches, mailboxMessageIdentity, mailboxRecordBelongsToTeam, normalizeBridgeMailboxMessage, readLegacyMailboxMessageIds } from '../../team/state/mailbox.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -37,13 +39,20 @@ import {
 function runtimeExec(command, stateDir, team) {
   if (process.env.OMX_RUNTIME_BRIDGE === '0') return;
   try {
-    const binaryPath = resolveRuntimeBinaryPath();
-    execFileSync(binaryPath, ['exec', JSON.stringify(command), `--state-dir=${stateDir}`], {
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
+    getDefaultBridge(stateDir).execCommand(command);
   } catch (error) {
+    const isSchemaFailure = error instanceof RuntimeBridgeError && error.context.command === 'schema';
+    const isTransportFailure = isRuntimeTransportError(error);
+    const isFinalization = command.command === 'MarkNotified'
+      || command.command === 'MarkDelivered'
+      || command.command === 'MarkFailed';
+    if (isFinalization && !isSchemaFailure && !isTransportFailure
+      && hasRuntimeDispatchIdentity(stateDir, command.request_id)) throw error;
+    if (isFinalization && (isSchemaFailure || isTransportFailure)) {
+      // Compatibility JSON alone is overwritten by runtime event replay.
+      recordRuntimeFinalization(stateDir, team, command);
+    }
+    if (!isFinalization && (command.command === 'MarkMailboxNotified' || !isTransportFailure)) throw error;
     recordBridgeFallback({
       stateDir,
       team,
@@ -57,6 +66,7 @@ function runtimeExec(command, stateDir, team) {
     // non-fatal: JS path is the fallback
   }
 }
+
 
 function bridgeErrorReason(error) {
   const err = error || {};
@@ -125,12 +135,12 @@ function readJson(path, fallback) {
     .catch(() => fallback);
 }
 
-async function readBridgeDispatchRequests(stateDir, teamName) {
+async function readBridgeDispatchRequests(stateDir, teamName, authoritativeRecords) {
   const candidate = join(stateDir, 'dispatch.json');
-  if (!existsSync(candidate)) return null;
+  if (!authoritativeRecords && !existsSync(candidate)) return null;
   let parsed;
   try {
-    parsed = JSON.parse(await readFile(candidate, 'utf8'));
+    parsed = authoritativeRecords ? { records: authoritativeRecords } : JSON.parse(await readFile(candidate, 'utf8'));
   } catch (error) {
     recordBridgeFallback({
       stateDir,
@@ -156,7 +166,7 @@ async function readBridgeDispatchRequests(stateDir, teamName) {
       if (!record || typeof record !== 'object') return null;
       const metadata = record.metadata && typeof record.metadata === 'object' ? record.metadata : {};
       const metadataTeam = safeString(metadata.team_name).trim();
-      if (metadataTeam && metadataTeam !== teamName) return null;
+      if (!metadataTeam || metadataTeam !== teamName) return null;
       return {
         request_id: safeString(record.request_id).trim(),
         kind: safeString(metadata.kind).trim() || 'inbox',
@@ -694,20 +704,32 @@ async function finalizeClaimedDispatchRequest({
           status: 'failed',
         });
       } else {
+        if (result.delivery_confirmed === true && process.env.OMX_RUNTIME_BRIDGE !== '0'
+          && hasRuntimeDispatchIdentity(stateDir, request.request_id)) {
+          // Persist a no-reinject receipt before runtime finalization can reject semantically.
+          recordRuntimeFinalization(stateDir, teamName, {
+            command: 'MarkNotified', request_id: request.request_id, channel: 'tmux',
+          });
+          recordRuntimeFinalization(stateDir, teamName, {
+            command: 'MarkDelivered', request_id: request.request_id,
+          });
+        }
         request.status = 'notified';
         request.notified_at = nowIso;
         request.last_reason = result.reason;
         runtimeExec({ command: 'MarkNotified', request_id: request.request_id, channel: 'tmux' }, stateDir, teamName);
         if (request.kind === 'mailbox' && request.message_id) {
-          runtimeExec({ command: 'MarkMailboxNotified', message_id: request.message_id }, stateDir, teamName);
-          if (usingLegacyRequests) {
-            await updateMailboxNotified(stateDir, teamName, request.to_worker, request.message_id).catch(() => {});
-          }
+          await updateMailboxNotified(stateDir, teamName, request.to_worker, request.message_id).catch(() => {});
+        }
+        if (result.delivery_confirmed === true) {
+          runtimeExec({ command: 'MarkDelivered', request_id: request.request_id }, stateDir, teamName);
+          request.status = 'delivered';
+          request.delivered_at = nowIso;
         }
         summary.processed += 1;
         mutated = true;
         await appendDispatchLog(logsDir, {
-          type: 'dispatch_notified',
+          type: result.delivery_confirmed === true ? 'dispatch_delivered' : 'dispatch_notified',
           team: teamName,
           request_id: request.request_id,
           worker: request.to_worker,
@@ -722,7 +744,7 @@ async function finalizeClaimedDispatchRequest({
           message_id: request.message_id || null,
           to_worker: request.to_worker,
           transport: 'send-keys',
-          result: 'notified',
+          result: result.delivery_confirmed === true ? 'delivered' : 'notified',
           reason: result.reason,
         });
       }
@@ -996,8 +1018,13 @@ async function injectDispatchRequest(request, config, cwd, stateDir) {
     if (narrowCap) {
       const wideProof = await verifyExplicitPane();
       if (!wideProof.ok) return exactPaneFailure(wideProof, true);
+      let wideCap;
       try {
-        const wideCap = await runProcess('tmux', verifyWideArgv, 2000);
+        wideCap = await runProcess('tmux', verifyWideArgv, 2000);
+      } catch {
+        // Capture failed; fall through to retry Enter.
+      }
+      if (wideCap) {
         const triggerInNarrow = capturedPaneContainsTrigger(narrowCap.stdout, request.trigger_message);
         const triggerNearTail = capturedPaneContainsTriggerNearTail(wideCap.stdout, request.trigger_message);
         if (triggerInNarrow || triggerNearTail) {
@@ -1022,10 +1049,10 @@ async function injectDispatchRequest(request, config, cwd, stateDir) {
         }
         // Worker is actively processing (mirrors sync path tmux-session.ts:1292-1294)
         if (paneHasActiveTask(wideCap.stdout)) {
-          runtimeExec({ command: 'MarkDelivered', request_id: request.request_id }, stateDir, request.team_name);
           return {
             ok: true,
             reason: 'tmux_send_keys_confirmed_active_task',
+            delivery_confirmed: true,
             pane: resolution.paneTarget,
             pane_source: resolution.source || null,
             readiness_evidence: paneGuard.readinessEvidence || null,
@@ -1044,10 +1071,10 @@ async function injectDispatchRequest(request, config, cwd, stateDir) {
           continue;
         }
         if (!triggerInNarrow && !triggerNearTail) {
-          runtimeExec({ command: 'MarkDelivered', request_id: request.request_id }, stateDir, request.team_name);
           return {
             ok: true,
             reason: 'tmux_send_keys_confirmed',
+            delivery_confirmed: true,
             pane: resolution.paneTarget,
             pane_source: resolution.source || null,
             readiness_evidence: paneGuard.readinessEvidence || null,
@@ -1056,8 +1083,6 @@ async function injectDispatchRequest(request, config, cwd, stateDir) {
             tmux_injection_attempted: true,
           };
         }
-      } catch {
-        // Capture failed; fall through to retry Enter.
       }
     }
     // Draft still visible and no active task — retry Enter
@@ -1103,8 +1128,34 @@ async function updateMailboxNotified(stateDir, teamName, workerName, messageId) 
   const mailboxPath = join(teamDirPath, 'mailbox', `${workerName}.json`);
   return await withMailboxLock(teamDirPath, workerName, async () => {
     const mailbox = await readJson(mailboxPath, { worker: workerName, messages: [] });
-    if (!mailbox || !Array.isArray(mailbox.messages)) return false;
-    const msg = mailbox.messages.find((candidate) => candidate?.message_id === messageId);
+    if (!mailbox || mailbox.worker !== workerName || !Array.isArray(mailbox.messages)) return false;
+    let msg = mailbox.messages.find((candidate) => candidate?.message_id === messageId && candidate.to_worker === workerName);
+    if (process.env.OMX_RUNTIME_BRIDGE !== '0') {
+      const records = getDefaultBridge(stateDir).readMailboxRecords();
+      const candidates = records.filter((candidate) => candidate.message_id === messageId
+        && (candidate.team_name == null || candidate.team_name === teamName));
+      const legacyIds = candidates.length === 0 || candidates.some((record) => record.team_name == null || record.body === ''
+        || mailbox.messages.some((message) => message?.message_id === messageId && message.created_at !== record.created_at))
+        ? await readLegacyMailboxMessageIds(teamName, workerName, mailbox, join(teamDirPath, 'events', 'events.ndjson'), records)
+        : new Set<string>();
+      const record = candidates.find((candidate) => mailboxRecordBelongsToTeam(candidate, teamName, workerName, legacyIds));
+      if (record) {
+        const normalized = normalizeBridgeMailboxMessage(record, legacyIds.has(messageId) ? msg : undefined);
+        msg = mailbox.messages.find((candidate) => mailboxMessageIdentity(candidate) === mailboxMessageIdentity(normalized)
+          || ((legacyIds.has(messageId) || hasUniqueScopedMailboxMatch(teamName, normalized, records, mailbox.messages))
+            && mailboxMessageContentMatches(candidate, normalized)));
+        if (!msg) {
+          msg = normalized;
+          mailbox.messages.push(msg);
+        }
+        runtimeExec({ command: 'MarkMailboxNotified', team_name: teamName, message_id: messageId }, stateDir, teamName);
+      } else if (candidates.length > 0 || !legacyIds.has(messageId)) {
+        return false;
+      }
+    } else {
+      const legacyIds = await readLegacyMailboxMessageIds(teamName, workerName, mailbox, join(teamDirPath, 'events', 'events.ndjson'));
+      if (!legacyIds.has(messageId)) return false;
+    }
     if (!msg) return false;
     if (!msg.notified_at) msg.notified_at = new Date().toISOString();
     await writeJsonAtomic(mailboxPath, mailbox);
@@ -1154,6 +1205,37 @@ async function listTeamDirectories(teamRoot: string): Promise<string[]> {
   return names;
 }
 
+// Cache only a projection verified against unchanged event contents and state versions.
+const refreshedDispatchStates = new Map();
+async function refreshDispatchProjection(stateDir) {
+  const readStateVersion = async () => Promise.all(['events.json', 'dispatch.json'].map((name) =>
+    stat(join(stateDir, name), { bigint: true }).then((info) =>
+      [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].map(String).join(':')).catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    })));
+  const before = await readStateVersion();
+  const cached = refreshedDispatchStates.get(stateDir);
+  if (cached && cached.state[0] === before[0] && cached.state[1] === before[1]) return cached.records;
+  refreshedDispatchStates.delete(stateDir);
+  const eventsPath = join(stateDir, 'events.json');
+  const readEvents = () => readFile(eventsPath, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  const eventsBefore = await readEvents();
+  const snapshot = getDefaultBridge(stateDir).execCommand({ command: 'CaptureSnapshot' });
+  if (!Array.isArray(snapshot.dispatch_records)) return; // Older compatible runtimes do not return records.
+  const eventsAfter = await readEvents();
+  const after = await readStateVersion();
+  let projected;
+  try { projected = JSON.parse(await readFile(join(stateDir, 'dispatch.json'), 'utf8')).records; } catch { /* A concurrent writer cannot prove a cache entry. */ }
+  if (eventsBefore === eventsAfter && isDeepStrictEqual(projected, snapshot.dispatch_records)) {
+    refreshedDispatchStates.set(stateDir, { state: after, records: snapshot.dispatch_records });
+  }
+  return snapshot.dispatch_records;
+}
+
 export async function drainPendingTeamDispatch({
   cwd,
   stateDir = resolveBridgeStateDir(cwd),
@@ -1193,10 +1275,19 @@ export async function drainPendingTeamDispatch({
     const config = await readJson(existsSync(manifestPath) ? manifestPath : configPath, {});
     const claims = [];
     await withDispatchLock(teamDirPath, async () => {
-      const bridgeRequests = await readBridgeDispatchRequests(stateDir, teamName);
+      await reconcileRuntimeFinalizations(stateDir, teamName);
+      let authoritativeRecords;
+      if (hasRuntimeAuthority(stateDir)) {
+        if (process.env.OMX_RUNTIME_BRIDGE === '0') throw new Error('runtime dispatch authority requires an enabled bridge');
+        authoritativeRecords = await refreshDispatchProjection(stateDir);
+      }
+      const bridgeRequests = await readBridgeDispatchRequests(stateDir, teamName, authoritativeRecords);
       const usingLegacyRequests = bridgeRequests === null;
       const requests = usingLegacyRequests ? await readJson(requestsPath, []) : bridgeRequests;
       if (!Array.isArray(requests)) return;
+      if (requests.some((request) => request && typeof request === 'object' && !shouldSkipRequest(request))) {
+        preflightRuntimeBridge(stateDir);
+      }
       const issueCooldownState = await readIssueCooldownState(teamDirPath);
       const triggerCooldownState = await readTriggerCooldownState(teamDirPath);
       const issueCooldownByIssue = issueCooldownState.by_issue || {};

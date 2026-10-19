@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { mkdtemp, rm, unlink, writeFile, readFile, mkdir, chmod, readdir } from 'fs/promises';
+import { appendFile, mkdtemp, rm, unlink, writeFile, readFile, mkdir, chmod, readdir } from 'fs/promises';
 import { join, relative, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync } from 'fs';
@@ -980,7 +980,11 @@ describe('runtime', () => {
     await mkdir(binDir, { recursive: true });
     await writeFakePromptWorkerBinary(
       fakeCodexPath,
-      `fs.writeFileSync(process.env.OMX_POLICY_ARGV_CAPTURE, JSON.stringify(process.argv.slice(2)));
+      `fs.writeFileSync(process.env.OMX_POLICY_ARGV_CAPTURE, JSON.stringify({
+  args: process.argv.slice(2),
+  launchId: process.env.OMX_CODEX_LAUNCH_ID,
+  entryPath: process.env.OMX_ENTRY_PATH,
+}));
 process.stdin.resume();
 setTimeout(() => process.exit(0), 5000);
 process.on('SIGTERM', () => process.exit(0));`,
@@ -991,6 +995,8 @@ process.on('SIGTERM', () => process.exit(0));`,
         await withPromptModeCodexEnv(binDir, {
           OMX_BYPASS_DEFAULT_SYSTEM_PROMPT: '0',
           OMX_POLICY_ARGV_CAPTURE: capturePath,
+          OMX_CODEX_LAUNCH_ID: 'leader-inherited-launch-id',
+          OMX_ENTRY_PATH: undefined,
           OMX_TEAM_WORKER_LAUNCH_ARGS: String.raw`--config 'sandbox_mode="workspace-write"' -- 'C:\workspace\nested\' '' '--sandbox=read-only' '--madmax'`,
         }, async () => {
           const previousArgv = process.argv;
@@ -1011,13 +1017,20 @@ process.on('SIGTERM', () => process.exit(0));`,
         });
       });
 
-      const workerArgs = JSON.parse(await waitForFileText(capturePath, (content) => content.length > 0)) as string[];
-      assert.deepEqual(workerArgs, [
+      const workerCapture = JSON.parse(await waitForFileText(capturePath, (content) => content.length > 0)) as {
+        args: string[];
+        launchId?: string;
+        entryPath?: string;
+      };
+      assert.deepEqual(workerCapture.args, [
         '--sandbox', 'workspace-write',
         '-c', 'model_reasoning_effort="medium"',
         '--model', 'gpt-6-astra',
         '--', 'C:\\workspace\\nested\\', '', '--sandbox=read-only', '--madmax',
       ]);
+      assert.ok(workerCapture.launchId);
+      assert.notEqual(workerCapture.launchId, 'leader-inherited-launch-id');
+      assert.ok(workerCapture.entryPath && existsSync(workerCapture.entryPath));
       const startedRuntime = runtime as TeamRuntime | null;
       assert.ok(startedRuntime);
       await shutdownTeam(startedRuntime.teamName, cwd, { force: true });
@@ -13301,6 +13314,16 @@ esac
           },
         ],
       }));
+      await appendFile(join(cwd, '.omx', 'state', 'team', 'team-no-spam', 'events', 'events.ndjson'), `${JSON.stringify({
+        event_id: 'legacy-message-already-notified',
+        created_at: notifiedAt,
+        team: 'team-no-spam',
+        type: 'message_received',
+        worker: 'worker-1',
+        from_worker: 'leader-fixed',
+        to_worker: 'worker-1',
+        message_id: 'msg-already-notified',
+      })}\n`);
 
       // First monitorTeam call — should see the message as already-notified (unnotified=[]).
       const result1 = await monitorTeam('team-no-spam', cwd);
@@ -13352,6 +13375,16 @@ esac
           },
         ],
       }));
+      await appendFile(join(cwd, '.omx', 'state', 'team', 'team-new-msg', 'events', 'events.ndjson'), `${JSON.stringify({
+        event_id: 'legacy-message-unnotified',
+        created_at: createdAt,
+        team: 'team-new-msg',
+        type: 'message_received',
+        worker: 'worker-1',
+        from_worker: 'leader-fixed',
+        to_worker: 'worker-1',
+        message_id: 'msg-unnotified',
+      })}\n`);
 
       // First poll — unnotified=[msg-unnotified]. notifyWorker will fail (no tmux in tests)
       // so markMessageNotified is not called and the snapshot has no entry for this message.

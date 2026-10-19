@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto';
-import { getDefaultBridge, isBridgeEnabled, resolveBridgeStateDir, type MailboxRecord, type RuntimeCommand } from '../../runtime/bridge.js';
+import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { getDefaultBridge, isBridgeEnabled, preflightRuntimeBridge, resolveBridgeStateDir, RuntimeBridgeError, type MailboxRecord, type RuntimeCommand } from '../../runtime/bridge.js';
 import { appendTeamDeliveryLogForCwd } from '../delivery-log.js';
 
 export interface TeamMailboxMessage {
@@ -17,13 +20,101 @@ export interface TeamMailbox {
   messages: TeamMailboxMessage[];
 }
 
+/** Old shadows may contain foreign IDs written by the pre-isolation bridge reader. */
+export async function readLegacyMailboxMessageIds(
+  teamName: string,
+  workerName: string,
+  mailbox: TeamMailbox,
+  eventPath: string,
+  bridgeRecords: readonly MailboxRecord[] = [],
+): Promise<Set<string>> {
+  if (!Array.isArray(bridgeRecords) || bridgeRecords.some((record) => !record || typeof record.message_id !== 'string')) {
+    return new Set<string>();
+  }
+  const shadowIds = new Set<string>();
+  const shadowsById = new Map<string, TeamMailboxMessage>();
+  const duplicateIds = new Set<string>();
+  if (mailbox.worker === workerName) {
+    for (const message of mailbox.messages) {
+      if (typeof message?.message_id !== 'string') continue;
+      if (shadowIds.has(message.message_id)) duplicateIds.add(message.message_id);
+      shadowIds.add(message.message_id);
+      shadowsById.set(message.message_id, message);
+    }
+    for (const message of mailbox.messages) {
+      if (message?.to_worker !== workerName) shadowIds.delete(message?.message_id);
+    }
+  }
+  const relevantBridgeRecords = bridgeRecords.filter((record) => record.team_name == null || record.team_name === teamName);
+  const bridgeIds = new Set<string>();
+  for (const record of relevantBridgeRecords) {
+    if (bridgeIds.has(record.message_id)) duplicateIds.add(record.message_id);
+    bridgeIds.add(record.message_id);
+    const shadow = shadowsById.get(record.message_id);
+    if (shadow && !mailboxMessageContentMatches(shadow, normalizeBridgeMailboxMessage(record, shadow))) {
+      duplicateIds.add(record.message_id);
+    }
+  }
+  for (const id of duplicateIds) shadowIds.delete(id);
+  const ids = new Set<string>();
+  if (shadowIds.size === 0) return ids;
+  const events = await readFile(eventPath, 'utf8').catch(() => '');
+  for (const line of events.split('\n')) {
+    try {
+      const event = JSON.parse(line);
+      if (event.team === teamName && event.type === 'message_received' && event.worker === workerName
+        && shadowIds.has(event.message_id)) ids.add(event.message_id);
+    } catch { /* A partial journal line cannot prove ownership. */ }
+  }
+  return ids;
+}
+
+export function mailboxRecordBelongsToTeam(
+  record: MailboxRecord,
+  teamName: string,
+  workerName: string,
+  legacyMessageIds: ReadonlySet<string>,
+): boolean {
+  return record.to_worker === workerName && (record.team_name == null
+    ? legacyMessageIds.has(record.message_id)
+    : record.team_name === teamName);
+}
+
+export function needsLegacyMailboxEvidence(
+  teamName: string,
+  workerName: string,
+  mailbox: TeamMailbox,
+  bridgeRecords: readonly MailboxRecord[],
+): boolean {
+  if (!Array.isArray(bridgeRecords) || bridgeRecords.some((record) => !record || typeof record.message_id !== 'string')) {
+    return true;
+  }
+  const recordsById = new Map<string, MailboxRecord[]>();
+  for (const record of bridgeRecords) {
+    if (record.team_name !== teamName || record.to_worker !== workerName) continue;
+    const matches = recordsById.get(record.message_id) ?? [];
+    matches.push(record);
+    recordsById.set(record.message_id, matches);
+  }
+  const seenIds = new Set<string>();
+  for (const message of mailbox.messages) {
+    if (typeof message?.message_id !== 'string' || message.message_id === '' || seenIds.has(message.message_id)) return true;
+    seenIds.add(message.message_id);
+    const records = recordsById.get(message.message_id);
+    if (records?.length !== 1) return true;
+    const [record] = records;
+    if (!mailboxMessageContentMatches(message, record) || (!record.body && message.body)) return true;
+  }
+  return false;
+}
+
 interface MailboxDeps {
   teamName: string;
   cwd: string;
   withMailboxLock: <T>(teamName: string, workerName: string, cwd: string, fn: () => Promise<T>) => Promise<T>;
   readMailbox: (teamName: string, workerName: string, cwd: string) => Promise<TeamMailbox>;
   readLegacyMailbox?: (teamName: string, workerName: string, cwd: string) => Promise<TeamMailbox>;
-  writeMailbox: (teamName: string, mailbox: TeamMailbox, cwd: string) => Promise<void>;
+  writeMailbox: (teamName: string, mailbox: TeamMailbox, cwd: string, replacedMessage?: TeamMailboxMessage) => Promise<void>;
   appendTeamEvent: (
     teamName: string,
     event: {
@@ -40,20 +131,67 @@ interface MailboxDeps {
 
 function executeBridgeCommand(cwd: string, command: RuntimeCommand): boolean {
   if (!isBridgeEnabled()) return false;
+  const stateDir = resolveBridgeStateDir(cwd);
+  if (command.command === 'MarkMailboxNotified' || command.command === 'MarkMailboxDelivered') {
+    const bridge = getDefaultBridge(stateDir);
+    let compat = bridge.readCompatFile<{ records?: MailboxRecord[] }>('mailbox.json');
+    const mailboxCompatPath = join(stateDir, 'mailbox.json');
+    const hasRuntimeAuthority = ['events.json', 'snapshot.json', 'mailbox.json']
+      .some((name) => existsSync(join(stateDir, name)));
+    const isAbsentFromCompat = (): boolean => Array.isArray(compat?.records)
+      && compat.records.every((record) => record && typeof record.message_id === 'string')
+      && !compat.records.some((record) => record.message_id === command.message_id
+        && (record.team_name == null || record.team_name === command.team_name));
+    if (hasRuntimeAuthority && (!existsSync(mailboxCompatPath) || isAbsentFromCompat())) {
+      // Refresh a missing or stale projection before deciding that a proven
+      // shadow message has no authoritative runtime record.
+      bridge.execCommand({ command: 'CaptureSnapshot' });
+      compat = bridge.readCompatFile<{ records?: MailboxRecord[] }>('mailbox.json');
+    }
+    if (isAbsentFromCompat() || !hasRuntimeAuthority) {
+      // Callers proved shadow+journal ownership and no compatible runtime row was found.
+      preflightRuntimeBridge(stateDir);
+      return false;
+    }
+  }
   try {
-    getDefaultBridge(resolveBridgeStateDir(cwd)).execCommand(command);
+    getDefaultBridge(stateDir).execCommand(command);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof RuntimeBridgeError && error.context.command === 'schema') throw error;
+    if (command.command === 'CreateMailboxMessage') return false;
+    throw error;
   }
 }
 
-export function normalizeBridgeMailboxMessage(record: MailboxRecord): TeamMailboxMessage {
+export function mailboxMessageIdentity(message: TeamMailboxMessage | MailboxRecord): string {
+  return JSON.stringify([message?.message_id, message?.from_worker, message?.to_worker, message?.body, message?.created_at]);
+}
+
+export function mailboxMessageContentMatches(left: TeamMailboxMessage | MailboxRecord, right: TeamMailboxMessage | MailboxRecord): boolean {
+  return left?.message_id === right?.message_id && left?.from_worker === right?.from_worker
+    && left?.to_worker === right?.to_worker && left?.body === right?.body;
+}
+
+export function hasUniqueScopedMailboxMatch(
+  teamName: string,
+  message: TeamMailboxMessage,
+  records: MailboxRecord[],
+  shadows: TeamMailboxMessage[],
+): boolean {
+  const scoped = records.filter((record) => record.team_name === teamName && record.message_id === message.message_id);
+  return scoped.length === 1 && mailboxMessageContentMatches(scoped[0], message)
+    && shadows.filter((shadow) => mailboxMessageContentMatches(shadow, message)).length === 1;
+}
+
+export function normalizeBridgeMailboxMessage(record: MailboxRecord, recovery?: TeamMailboxMessage): TeamMailboxMessage {
+  const recoveredBody = recovery?.message_id === record.message_id
+    && recovery.from_worker === record.from_worker && recovery.to_worker === record.to_worker ? recovery.body : '';
   return {
     message_id: record.message_id,
     from_worker: record.from_worker,
     to_worker: record.to_worker,
-    body: record.body,
+    body: record.body || recoveredBody,
     created_at: record.created_at,
     notified_at: record.notified_at ?? undefined,
     delivered_at: record.delivered_at ?? undefined,
@@ -78,8 +216,14 @@ export async function sendDirectMessage(
     const dedupeCandidates = [...mailbox.messages];
     if (deps.readLegacyMailbox) {
       const seenMessageIds = new Set(dedupeCandidates.map((candidate) => candidate.message_id));
-      for (const legacyMessage of legacyMailbox.messages) {
-        if (!seenMessageIds.has(legacyMessage.message_id)) {
+      const missingLegacyMessages = legacyMailbox.messages.filter((message) => !seenMessageIds.has(message.message_id));
+      const legacyIds = missingLegacyMessages.length === 0
+        ? new Set<string>()
+        : await readLegacyMailboxMessageIds(deps.teamName, toWorker, legacyMailbox,
+          join(resolveBridgeStateDir(deps.cwd), 'team', deps.teamName, 'events', 'events.ndjson'),
+          isBridgeEnabled() ? getDefaultBridge(resolveBridgeStateDir(deps.cwd)).readMailboxRecords() : []);
+      for (const legacyMessage of missingLegacyMessages) {
+        if (legacyIds.has(legacyMessage.message_id) && !seenMessageIds.has(legacyMessage.message_id)) {
           dedupeCandidates.push(legacyMessage);
           seenMessageIds.add(legacyMessage.message_id);
         }
@@ -105,6 +249,7 @@ export async function sendDirectMessage(
       return;
     }
 
+    preflightRuntimeBridge(resolveBridgeStateDir(deps.cwd));
     const msgId = randomUUID();
     const provisionalMessage: TeamMailboxMessage = {
       message_id: msgId,
@@ -123,13 +268,21 @@ export async function sendDirectMessage(
     await deps.writeMailbox(deps.teamName, shadowMailbox, deps.cwd);
     msg = provisionalMessage;
     created = true;
-    if (executeBridgeCommand(deps.cwd, {
-      command: 'CreateMailboxMessage',
-      message_id: msgId,
-      from_worker: fromWorker,
-      to_worker: toWorker,
-      body,
-    })) {
+    let bridgeCreated: boolean;
+    try {
+      bridgeCreated = executeBridgeCommand(deps.cwd, {
+        command: 'CreateMailboxMessage',
+        team_name: deps.teamName,
+        message_id: msgId,
+        from_worker: fromWorker,
+        to_worker: toWorker,
+        body,
+      });
+    } catch (error) {
+      await deps.writeMailbox(deps.teamName, legacyMailbox, deps.cwd, provisionalMessage);
+      throw error;
+    }
+    if (bridgeCreated) {
       const bridgeMailbox = await deps.readMailbox(deps.teamName, toWorker, deps.cwd);
       const bridgeMessage = bridgeMailbox.messages.find((candidate) => candidate.message_id === msgId);
       if (bridgeMessage) {
@@ -142,10 +295,17 @@ export async function sendDirectMessage(
           worker: legacyMailbox.worker,
           messages: [...shadowMailbox.messages],
         };
-        const shadowIndex = updatedShadowMailbox.messages.findIndex((candidate) => candidate.message_id === msgId);
+        const shadowIndex = updatedShadowMailbox.messages.findIndex((candidate) => mailboxMessageIdentity(candidate) === mailboxMessageIdentity(provisionalMessage));
         if (shadowIndex >= 0) updatedShadowMailbox.messages[shadowIndex] = msg;
-        await deps.writeMailbox(deps.teamName, updatedShadowMailbox, deps.cwd);
+        await deps.writeMailbox(deps.teamName, updatedShadowMailbox, deps.cwd, provisionalMessage);
       }
+    }
+    if (created) {
+      await deps.appendTeamEvent(
+        deps.teamName,
+        { type: 'message_received', worker: toWorker, task_id: undefined, message_id: msgId, reason: undefined },
+        deps.cwd,
+      );
     }
   });
 
@@ -155,11 +315,6 @@ export async function sendDirectMessage(
   const persistedMessage = msg as TeamMailboxMessage;
 
   if (created) {
-    await deps.appendTeamEvent(
-      deps.teamName,
-      { type: 'message_received', worker: toWorker, task_id: undefined, message_id: persistedMessage.message_id, reason: undefined },
-      deps.cwd,
-    );
     await appendTeamDeliveryLogForCwd(deps.cwd, {
       event: 'mailbox_created',
       source: 'team.state.mailbox',
@@ -195,55 +350,33 @@ export async function markMessageDelivered(
   messageId: string,
   deps: MailboxDeps,
 ): Promise<boolean> {
-  const existingMailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-  const existingMessage = existingMailbox.messages.find((message) => message.message_id === messageId);
-  if (!existingMessage) return false;
-  if (existingMessage.delivered_at) return true;
-
-  if (executeBridgeCommand(deps.cwd, { command: 'MarkMailboxDelivered', message_id: messageId })) {
-    const updated = await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
-      const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-      const msg = mailbox.messages.find((message) => message.message_id === messageId);
-      if (!msg) return false;
-      if (!msg.delivered_at) {
-        msg.delivered_at = new Date().toISOString();
-        await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
-      } else {
-        await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
-      }
-      return true;
-    });
-    if (updated) {
-      await appendTeamDeliveryLogForCwd(deps.cwd, {
-        event: 'delivered',
-        source: 'team.state.mailbox',
-        team: deps.teamName,
-        message_id: messageId,
-        to_worker: workerName,
-        transport: 'bridge',
-        result: 'updated',
-      });
-    }
-    return updated;
-  }
+  if (!(await deps.readMailbox(deps.teamName, workerName, deps.cwd)).messages.some((message) => message.message_id === messageId)) return false;
+  let transport: 'bridge' | 'legacy-json' | undefined;
   const updated = await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
+    const existingMailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
+    const existingMessage = existingMailbox.messages.find((message) => message.message_id === messageId);
+    if (!existingMessage) return false;
+    if (existingMessage.delivered_at && existingMailbox.messages.filter((message) => message.message_id === messageId).length === 1) return true;
+
+    transport = executeBridgeCommand(deps.cwd, { command: 'MarkMailboxDelivered', team_name: deps.teamName, message_id: messageId })
+      ? 'bridge' : 'legacy-json';
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-    const msg = mailbox.messages.find((m) => m.message_id === messageId);
+    const msg = mailbox.messages.find((message) => message.message_id === messageId);
     if (!msg) return false;
-    if (!msg.delivered_at) {
-      msg.delivered_at = new Date().toISOString();
+    if (!msg.delivered_at || transport === 'bridge') {
+      if (!msg.delivered_at) msg.delivered_at = new Date().toISOString();
       await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
     }
     return true;
   });
-  if (updated) {
+  if (updated && transport) {
     await appendTeamDeliveryLogForCwd(deps.cwd, {
       event: 'delivered',
       source: 'team.state.mailbox',
       team: deps.teamName,
       message_id: messageId,
       to_worker: workerName,
-      transport: 'legacy-json',
+      transport,
       result: 'updated',
     });
   }
@@ -255,19 +388,18 @@ export async function markMessageNotified(
   messageId: string,
   deps: MailboxDeps,
 ): Promise<boolean> {
-  if (executeBridgeCommand(deps.cwd, { command: 'MarkMailboxNotified', message_id: messageId })) {
-    return await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
-      const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-      const msg = mailbox.messages.find((message) => message.message_id === messageId);
-      if (!msg) return false;
-      msg.notified_at = new Date().toISOString();
-      await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);
-      return true;
-    });
-  }
+  const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
+  if (!mailbox.messages.some((message) => message.message_id === messageId)) return false;
+
   return await deps.withMailboxLock(deps.teamName, workerName, deps.cwd, async () => {
+    const existingMailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
+    const existingMessage = existingMailbox.messages.find((message) => message.message_id === messageId);
+    if (!existingMessage) return false;
+    if (existingMessage.delivered_at && existingMailbox.messages.filter((message) => message.message_id === messageId).length === 1) return true;
+
+    executeBridgeCommand(deps.cwd, { command: 'MarkMailboxNotified', team_name: deps.teamName, message_id: messageId });
     const mailbox = await deps.readMailbox(deps.teamName, workerName, deps.cwd);
-    const msg = mailbox.messages.find((m) => m.message_id === messageId);
+    const msg = mailbox.messages.find((message) => message.message_id === messageId);
     if (!msg) return false;
     msg.notified_at = new Date().toISOString();
     await deps.writeMailbox(deps.teamName, mailbox, deps.cwd);

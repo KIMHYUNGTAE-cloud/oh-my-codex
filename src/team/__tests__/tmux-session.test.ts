@@ -1489,6 +1489,37 @@ describe('buildWorkerStartupCommand', () => {
     }
   });
 
+  it('assigns fresh plugin-hook routing context to each Codex worker launch', () => {
+    const previousEntryPath = process.env.OMX_ENTRY_PATH;
+    const previousLaunchId = process.env.OMX_CODEX_LAUNCH_ID;
+    delete process.env.OMX_ENTRY_PATH;
+    delete process.env.OMX_CODEX_LAUNCH_ID;
+    try {
+      const inheritedLeaderContext = {
+        OMX_CODEX_LAUNCH_ID: 'leader-inherited-launch-id',
+        OMX_ENTRY_PATH: '/leader/omx.js',
+      };
+      const first = buildWorkerProcessLaunchSpec(
+        'routing-team', 1, [], '/tmp/workspace', inheritedLeaderContext, 'codex',
+      );
+      const second = buildWorkerProcessLaunchSpec(
+        'routing-team', 2, [], '/tmp/workspace', inheritedLeaderContext, 'codex',
+      );
+
+      assert.ok(first.env.OMX_CODEX_LAUNCH_ID);
+      assert.notEqual(first.env.OMX_CODEX_LAUNCH_ID, inheritedLeaderContext.OMX_CODEX_LAUNCH_ID);
+      assert.notEqual(first.env.OMX_CODEX_LAUNCH_ID, second.env.OMX_CODEX_LAUNCH_ID);
+      assert.ok(first.env.OMX_ENTRY_PATH && fs.existsSync(first.env.OMX_ENTRY_PATH));
+      assert.notEqual(first.env.OMX_ENTRY_PATH, inheritedLeaderContext.OMX_ENTRY_PATH);
+      assert.ok(second.env.OMX_ENTRY_PATH && fs.existsSync(second.env.OMX_ENTRY_PATH));
+    } finally {
+      if (typeof previousEntryPath === 'string') process.env.OMX_ENTRY_PATH = previousEntryPath;
+      else delete process.env.OMX_ENTRY_PATH;
+      if (typeof previousLaunchId === 'string') process.env.OMX_CODEX_LAUNCH_ID = previousLaunchId;
+      else delete process.env.OMX_CODEX_LAUNCH_ID;
+    }
+  });
+
   it('auto-selects claude worker CLI from claude model', () => {
     const prevShell = process.env.SHELL;
     const prevCli = process.env.OMX_TEAM_WORKER_CLI;
@@ -4384,6 +4415,16 @@ esac
       assert.equal(waitForWorkerReady('omx-team-x', 1, 1), false);
     });
   });
+
+  it('does not run final check after timeout with zero timeout (Codex finding 4310223535)', () => {
+    // With timeoutMs=0, the while loop exits immediately (0 < 0 is false)
+    // The final check should not run, or at least not report success after deadline
+    withEmptyPath(() => {
+      const result = waitForWorkerReady('omx-team-x', 1, 0);
+      // With timeout=0, we should get false (not a successful check after deadline)
+      assert.equal(result, false, "waitForWorkerReady with timeout=0 should return false, not run checks after deadline");
+    });
+  });
 });
 
 
@@ -4684,6 +4725,16 @@ esac
 
     await withEmptyPath(async () => {
       assert.equal(await waitForWorkerReadyAsync('omx-team-x', 1, 1), false);
+    });
+  });
+
+  it('does not run final check after timeout with zero timeout (Codex finding 4310223535)', async () => {
+    // With timeoutMs=0, the while loop exits immediately (0 < 0 is false)
+    // The final check should not run, or at least not report success after deadline
+    await withEmptyPath(async () => {
+      const result = await waitForWorkerReadyAsync('omx-team-x', 1, 0);
+      // With timeout=0, we should get false (not a successful check after deadline)
+      assert.equal(result, false, "waitForWorkerReadyAsync with timeout=0 should return false, not run checks after deadline");
     });
   });
 });

@@ -59,7 +59,9 @@ import {
 
 } from '../state.js';
 import { normalizeDispatchRequest } from '../state/dispatch.js';
+import { queueDirectMailboxMessage, queueBroadcastMailboxMessage, type TeamNotifier } from '../mcp-comm.js';
 import { claimTask as claimTaskWithDeps } from '../state/tasks.js';
+import { sendDirectMessage as sendDirectMessageWithDeps, markMessageDelivered as markMessageDeliveredWithDeps, needsLegacyMailboxEvidence, normalizeBridgeMailboxMessage, type TeamMailbox } from '../state/mailbox.js';
 import { withScalingLock as withScalingLeaseLock, withTeamLock } from '../state/locks.js';
 import type { TeamTaskV2 } from '../state/types.js';
 import type { TeamReminderIntent } from '../reminder-intents.js';
@@ -122,6 +124,7 @@ function nowIso() {
 if (argv[0] === 'schema') {
   process.stdout.write(JSON.stringify({
     schema_version: 1,
+    capabilities: ['team-mailbox-scope-v1'],
     commands: [
       'acquire-authority',
       'renew-authority',
@@ -140,7 +143,7 @@ if (argv[0] === 'schema') {
   process.exit(0);
 }
 
-if (argv[0] !== 'exec') process.exit(1);
+if (argv[0] !== 'exec' && argv[0] !== 'exec-scoped') process.exit(1);
 
 const command = JSON.parse(argv[1] || '{}');
 const dir = stateDir();
@@ -152,6 +155,12 @@ const timestamp = nowIso();
 
 switch (command.command) {
   case 'QueueDispatch': {
+    if (process.env.OMX_TEST_REJECT_QUEUE_DISPATCH === '1') {
+      process.stderr.write('runtime state could not load\\n');
+      process.exit(1);
+    }
+    writeJson(path.join(dir, 'events.json'), [...readJson(path.join(dir, 'events.json'), []), { event: 'DispatchQueued', request_id: command.request_id, metadata: command.metadata }]);
+    writeJson(path.join(dir, 'dispatch-seen.json'), { schema_version: 2, ledger_epoch: 1, request_ids: [...readJson(path.join(dir, 'dispatch-seen.json'), { request_ids: [] }).request_ids, command.request_id] });
     dispatch.records.push({
       request_id: command.request_id,
       target: command.target,
@@ -179,6 +188,10 @@ switch (command.command) {
     process.exit(0);
   }
   case 'MarkDelivered': {
+    if (process.env.OMX_TEST_REJECT_MARK_DELIVERED === '1') {
+      process.stderr.write('invalid delivered transition\\n');
+      process.exit(1);
+    }
     const record = dispatch.records.find((entry) => entry.request_id === command.request_id);
     if (record) {
       record.status = 'delivered';
@@ -210,12 +223,30 @@ switch (command.command) {
   }
   case 'CaptureSnapshot': {
     if (process.env.OMX_TEST_SKIP_SNAPSHOT_COMPAT_WRITE !== '1') writeJson(dispatchPath, dispatch);
+    if (process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE === '1') {
+      const events = readJson(path.join(dir, 'events.json'), []);
+      for (const event of events) {
+        if (event?.event !== 'MailboxMessageCreated' || typeof event.message_id !== 'string'
+          || mailbox.records.some((record) => record?.message_id === event.message_id && record.team_name === event.team_name)) continue;
+        mailbox.records.push({
+          team_name: event.team_name ?? null,
+          message_id: event.message_id,
+          from_worker: event.from_worker,
+          to_worker: event.to_worker,
+          body: event.body ?? '',
+          created_at: timestamp,
+          notified_at: null,
+          delivered_at: null,
+        });
+      }
+      writeJson(mailboxPath, mailbox);
+    }
     process.stdout.write(JSON.stringify({ event: 'SnapshotCaptured' }) + '\\n');
     process.exit(0);
   }
 
   case 'CreateMailboxMessage': {
-    mailbox.records.push({
+    mailbox.records.push({ team_name: command.team_name,
       message_id: command.message_id,
       from_worker: command.from_worker,
       to_worker: command.to_worker,
@@ -229,7 +260,10 @@ switch (command.command) {
     process.exit(0);
   }
   case 'MarkMailboxNotified': {
-    const record = mailbox.records.find((entry) => entry.message_id === command.message_id);
+    const candidates = mailbox.records.filter((entry) => entry.message_id === command.message_id);
+    const scoped = candidates.filter((entry) => command.team_name != null && entry.team_name === command.team_name);
+    const record = scoped.length === 1 ? scoped[0] : scoped.length === 0 && candidates.length === 1 && candidates[0].team_name == null ? candidates[0] : null;
+    if (!record || record.delivered_at) process.exit(1);
     if (record) {
       record.notified_at = timestamp;
       writeJson(mailboxPath, mailbox);
@@ -238,7 +272,10 @@ switch (command.command) {
     process.exit(0);
   }
   case 'MarkMailboxDelivered': {
-    const record = mailbox.records.find((entry) => entry.message_id === command.message_id);
+    const candidates = mailbox.records.filter((entry) => entry.message_id === command.message_id);
+    const scoped = candidates.filter((entry) => command.team_name != null && entry.team_name === command.team_name);
+    const record = scoped.length === 1 ? scoped[0] : scoped.length === 0 && candidates.length === 1 && candidates[0].team_name == null ? candidates[0] : null;
+    if (!record || record.delivered_at) process.exit(1);
     if (record) {
       record.delivered_at = timestamp;
       writeJson(mailboxPath, mailbox);
@@ -561,10 +598,10 @@ describe('team state', () => {
 set -eu
 printf '%s\n' "$*" >> "${runtimeLogPath}"
 if [[ "\${1:-}" == "schema" ]]; then
-  printf '{"schema_version":1,"commands":["acquire-authority","renew-authority","queue-dispatch","mark-notified","mark-delivered","mark-failed","remove-dispatch-records","request-replay","capture-snapshot"],"events":[],"transport":"tmux"}\n'
+  printf '{"schema_version":1,"capabilities":["team-mailbox-scope-v1"],"commands":["acquire-authority","renew-authority","queue-dispatch","mark-notified","mark-delivered","mark-failed","remove-dispatch-records","request-replay","capture-snapshot"],"events":[],"transport":"tmux"}\n'
   exit 0
 fi
-if [[ "\${1:-}" == "exec" ]]; then
+if [[ "\${1:-}" == "exec-scoped" ]]; then
   if [[ "$*" == *'"command":"CaptureSnapshot"'* ]]; then
     printf '{"event":"SnapshotCaptured"}\n'
   else
@@ -590,7 +627,7 @@ exit 1
       );
 
       const runtimeLog = await readFile(runtimeLogPath, 'utf8');
-      const queueLine = runtimeLog.split('\n').find((line) => line.startsWith('exec {"command":"QueueDispatch"'));
+      const queueLine = runtimeLog.split('\n').find((line) => line.startsWith('exec-scoped {"command":"QueueDispatch"'));
       assert.ok(queueLine, 'expected QueueDispatch bridge call');
       const jsonStart = queueLine.indexOf('{');
       const stateDirFlag = queueLine.lastIndexOf(' --state-dir=');
@@ -696,6 +733,114 @@ exit 1
     }
   });
 
+  it('hides unscoped bridge dispatch records instead of assigning them to the caller Team', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-unscoped-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtimePath = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('dispatch-scope-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('dispatch-scope-beta', 't', 'executor', 1, cwd);
+      const compatPath = join(cwd, '.omx', 'state', 'dispatch.json');
+      await writeFile(compatPath, JSON.stringify({ records: [
+        {
+          request_id: 'unscoped-request', target: 'worker-1', status: 'pending', created_at: '2026-01-01T00:00:00.000Z',
+          notified_at: null, delivered_at: null, failed_at: null, reason: 'foreign prompt', metadata: { kind: 'inbox' },
+        },
+        {
+          request_id: 'beta-request', target: 'worker-1', status: 'pending', created_at: '2026-01-01T00:00:00.000Z',
+          notified_at: null, delivered_at: null, failed_at: null, reason: 'beta prompt',
+          metadata: { kind: 'inbox', team_name: 'dispatch-scope-beta', trigger_message: 'beta prompt' },
+        },
+      ] }));
+
+      assert.deepEqual(await listDispatchRequests('dispatch-scope-alpha', cwd), []);
+      assert.deepEqual((await listDispatchRequests('dispatch-scope-beta', cwd)).map((request) => request.request_id), ['beta-request']);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not convert semantic QueueDispatch failures into JSON-only requests', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-semantic-failure-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const previousRejectQueue = process.env.OMX_TEST_REJECT_QUEUE_DISPATCH;
+    try {
+      const teamName = 'dispatch-semantic-failure';
+      const runtimePath = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      process.env.OMX_TEST_REJECT_QUEUE_DISPATCH = '1';
+      await initTeamState(teamName, 't', 'executor', 1, cwd);
+      await writeFile(join(cwd, '.omx', 'state', 'events.json'), '[]');
+
+      await assert.rejects(
+        () => enqueueDispatchRequest(teamName, {
+          kind: 'inbox', to_worker: 'worker-1', trigger_message: 'do not queue on corrupted runtime state',
+        }, cwd),
+        /exec-scoped failed/,
+      );
+      assert.deepEqual(await listDispatchRequests(teamName, cwd), []);
+      const compatPath = join(cwd, '.omx', 'state', 'dispatch.json');
+      await assert.rejects(readFile(compatPath), { code: 'ENOENT' });
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      if (previousRejectQueue === undefined) delete process.env.OMX_TEST_REJECT_QUEUE_DISPATCH;
+      else process.env.OMX_TEST_REJECT_QUEUE_DISPATCH = previousRejectQueue;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not downgrade semantic dispatch finalization failures to JSON success', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-finalization-semantic-failure-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const previousRejectDelivered = process.env.OMX_TEST_REJECT_MARK_DELIVERED;
+    try {
+      const teamName = 'disp-final-semantic-failure';
+      const runtimePath = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState(teamName, 't', 'executor', 1, cwd);
+      const request = (await enqueueDispatchRequest(teamName, {
+        kind: 'inbox', to_worker: 'worker-1', trigger_message: 'do not fake delivery',
+      }, cwd)).request;
+      await markDispatchRequestNotified(teamName, request.request_id, {}, cwd);
+
+      process.env.OMX_TEST_REJECT_MARK_DELIVERED = '1';
+      await assert.rejects(
+        () => markDispatchRequestDelivered(teamName, request.request_id, {}, cwd),
+        /exec-scoped failed/,
+      );
+      assert.equal((await readDispatchRequest(teamName, request.request_id, cwd))?.status, 'notified');
+      await assert.rejects(
+        readFile(join(cwd, '.omx', 'state', 'team', teamName, 'dispatch', 'runtime-finalizations.jsonl')),
+        { code: 'ENOENT' },
+      );
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      if (previousRejectDelivered === undefined) delete process.env.OMX_TEST_REJECT_MARK_DELIVERED;
+      else process.env.OMX_TEST_REJECT_MARK_DELIVERED = previousRejectDelivered;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('preserves legacy rollback evidence when authoritative dispatch absence verification is unavailable', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-authority-unavailable-'));
     const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
@@ -787,7 +932,7 @@ exit 1
 
       assert.deepEqual(JSON.parse(await readFile(legacyPath, 'utf8')), []);
       const runtimeLog = await readFile(runtimeLogPath, 'utf8');
-      const removalLine = runtimeLog.split('\n').find((line) => line.startsWith('exec {"command":"RemoveDispatchRecords"'));
+      const removalLine = runtimeLog.split('\n').find((line) => line.startsWith('exec-scoped {"command":"RemoveDispatchRecords"'));
       assert.ok(removalLine);
       const removalPayload = JSON.parse(removalLine.slice(removalLine.indexOf('{'), removalLine.lastIndexOf(' --state-dir='))) as { request_ids: string[] };
       assert.deepEqual(removalPayload.request_ids, [scopedRequestId]);
@@ -1902,6 +2047,7 @@ exit 1
   it('mailbox APIs: DM, broadcast, and mark delivered', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-'));
     try {
+      assert.equal(await markMessageDelivered('missing-team', 'worker-2', 'missing-message', cwd), false);
       await initTeamState('team-msg', 't', 'executor', 2, cwd);
 
       const dm = await sendDirectMessage('team-msg', 'worker-1', 'worker-2', 'hello', cwd);
@@ -1918,6 +2064,1258 @@ exit 1
       const parsed = JSON.parse(mailboxDisk) as { messages: Array<{ delivered_at?: string }> };
       assert.ok(parsed.messages.some((m) => typeof m.delivered_at === 'string'));
     } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips legacy ownership scans when shadow messages have complete scoped runtime records', () => {
+    const message = {
+      message_id: 'scoped-message',
+      from_worker: 'leader-fixed',
+      to_worker: 'worker-1',
+      body: 'complete payload',
+      created_at: '2026-10-16T00:00:00.000Z',
+    };
+    const mailbox = { worker: 'worker-1', messages: [message] };
+    const scopedRecord = { ...message, team_name: 'alpha', notified_at: null, delivered_at: null };
+    assert.equal(needsLegacyMailboxEvidence('alpha', 'worker-1', mailbox, [scopedRecord]), false);
+    assert.equal(needsLegacyMailboxEvidence('alpha', 'worker-1', mailbox, []), true);
+    assert.equal(needsLegacyMailboxEvidence('alpha', 'worker-1', mailbox, [{ ...scopedRecord, body: '' }]), true);
+  });
+
+  it('keeps concurrent delivery acknowledgements idempotent', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-concurrent-ack-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const teamName = 'concurrent-ack';
+      await initTeamState(teamName, 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const message = await sendDirectMessage(teamName, 'leader-fixed', 'worker-1', 'hello', cwd);
+      let lockTail: Promise<void> = Promise.resolve();
+      const deps = {
+        teamName, cwd,
+        withMailboxLock: async <T>(_team: string, _worker: string, _cwd: string, fn: () => Promise<T>): Promise<T> => {
+          const previous = lockTail;
+          let release!: () => void;
+          lockTail = new Promise<void>((resolve) => { release = resolve; });
+          await previous;
+          try { return await fn(); } finally { release(); }
+        },
+        readMailbox: async (): Promise<TeamMailbox> => {
+          const records = JSON.parse(readFileSync(join(cwd, '.omx', 'state', 'mailbox.json'), 'utf8')).records;
+          const snapshot = { worker: 'worker-1', messages: records.map(normalizeBridgeMailboxMessage) };
+          // Let concurrent callers observe the same pending snapshot before either acknowledges it.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          return snapshot;
+        },
+        writeMailbox: async (_team: string, mailbox: TeamMailbox) => {
+          await writeFile(join(cwd, '.omx', 'state', 'team', teamName, 'mailbox', 'worker-1.json'), JSON.stringify(mailbox));
+        },
+        appendTeamEvent: async () => {},
+        readTeamConfig: async () => null,
+      };
+      assert.deepEqual(await Promise.allSettled([
+        markMessageDeliveredWithDeps('worker-1', message.message_id, deps),
+        markMessageDeliveredWithDeps('worker-1', message.message_id, deps),
+      ]), [{ status: 'fulfilled', value: true }, { status: 'fulfilled', value: true }]);
+      assert.equal((await readFile(runtimeLogPath, 'utf8')).split('MarkMailboxDelivered').length - 1, 1);
+      assert.ok((await listMailboxMessages(teamName, 'worker-1', cwd))[0].delivered_at);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers direct and broadcast dispatch after a post-notify runtime downgrade', async () => {
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+    for (const mode of ['direct', 'broadcast'] as const) {
+      const cwd = await mkdtemp(join(tmpdir(), 'omx-mcp-runtime-swap-'));
+      try {
+        const teamName = 'runtime-swap';
+        await initTeamState(teamName, 't', 'executor', 2, cwd);
+        const runtimePath = join(cwd, 'runtime');
+        const logPath = join(cwd, 'runtime.log');
+        await writeCompatRuntimeFixture(runtimePath, logPath);
+        process.env.OMX_RUNTIME_BINARY = runtimePath;
+        process.env.OMX_RUNTIME_BRIDGE = '1';
+        const notified: string[] = [];
+        const notify: TeamNotifier = async (target) => {
+          notified.push(target.workerName);
+          if (notified.length === 1) await writeFile(runtimePath, '#!/usr/bin/env node\nconsole.log(JSON.stringify({version:1,capabilities:[]}));\n');
+          return { ok: true, transport: 'tmux_send_keys', reason: 'sent' };
+        };
+        const send = () => mode === 'direct'
+          ? queueDirectMailboxMessage({ teamName, fromWorker: 'leader-fixed', toWorker: 'worker-1', toWorkerIndex: 1,
+            body: 'direct', triggerMessage: 'read inbox', cwd, notify })
+          : queueBroadcastMailboxMessage({ teamName, fromWorker: 'leader-fixed', body: 'broadcast', cwd, notify,
+            recipients: [{ workerName: 'worker-1', workerIndex: 1 }, { workerName: 'worker-2', workerIndex: 2 }],
+            triggerFor: () => 'read broadcast inbox' });
+        await assert.rejects(send, /team-mailbox-scope-v1/);
+        assert.equal((await listDispatchRequests(teamName, cwd))[0].status, 'notified');
+        const stateDir = join(cwd, '.omx', 'state');
+        const journal = join(stateDir, 'team', teamName, 'dispatch', 'runtime-finalizations.jsonl');
+        assert.equal(JSON.parse((await readFile(journal, 'utf8')).trim()).command, 'MarkNotified');
+        assert.equal((await listMailboxMessages(teamName, 'worker-1', cwd))[0].notified_at, undefined);
+        await writeCompatRuntimeFixture(runtimePath, logPath);
+        // Model runtime event replay replacing the temporary JS projection.
+        const projectionPath = join(stateDir, 'dispatch.json');
+        const projection = JSON.parse(await readFile(projectionPath, 'utf8'));
+        for (const record of projection.records) record.status = 'pending';
+        await writeFile(projectionPath, JSON.stringify(projection));
+        let reinjections = 0;
+        const drain = () => drainPendingTeamDispatch({ cwd, injector: async () => {
+          reinjections += 1;
+          return { ok: true, reason: 'unexpected' };
+        } });
+        await drain();
+        assert.equal(reinjections, 0);
+        assert.equal(existsSync(journal), false);
+        await send();
+        assert.deepEqual(notified, mode === 'direct' ? ['worker-1'] : ['worker-1', 'worker-2']);
+        await drain();
+        assert.equal(reinjections, 0);
+      } finally {
+        if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+        else process.env.OMX_RUNTIME_BINARY = previousBinary;
+        if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+        else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('finishes direct and broadcast notification when workers acknowledge before notify returns', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-fast-consumer-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const teamName = 'fast-consumer';
+      await initTeamState(teamName, 't', 'executor', 2, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      const logPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, logPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const notified: string[] = [];
+      const notify: TeamNotifier = async (target, _text, context) => {
+        assert.ok(context.message_id);
+        assert.equal(await markMessageDelivered(teamName, target.workerName, context.message_id, cwd), true);
+        notified.push(target.workerName);
+        return { ok: true, transport: 'tmux_send_keys', reason: 'sent' };
+      };
+      const direct = await queueDirectMailboxMessage({
+        teamName, fromWorker: 'leader-fixed', toWorker: 'worker-1', toWorkerIndex: 1,
+        body: 'direct', triggerMessage: 'read inbox', cwd, notify,
+      });
+      assert.equal(direct.ok, true);
+      const broadcast = await queueBroadcastMailboxMessage({
+        teamName, fromWorker: 'leader-fixed', body: 'broadcast', cwd, notify,
+        recipients: [{ workerName: 'worker-1', workerIndex: 1 }, { workerName: 'worker-2', workerIndex: 2 }],
+        triggerFor: () => 'read broadcast inbox',
+      });
+      assert.deepEqual(broadcast.map((outcome) => outcome.ok), [true, true]);
+      assert.deepEqual(notified, ['worker-1', 'worker-1', 'worker-2']);
+      assert.deepEqual((await listDispatchRequests(teamName, cwd)).map((request) => request.status), ['notified', 'notified', 'notified']);
+      assert.equal((await readFile(logPath, 'utf8')).includes('MarkMailboxNotified'), false);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes fallback mailbox ownership before releasing the mailbox lock', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-fallback-dedupe-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+    process.env.OMX_RUNTIME_BRIDGE = '1';
+    let lockTail: Promise<void> = Promise.resolve();
+    let lockHeld = false;
+    let mailbox: TeamMailbox = { worker: 'worker-1', messages: [] };
+    let writes = 0;
+    let events = 0;
+    const eventIds = new Set<string>();
+    const copyMailbox = (source: TeamMailbox): TeamMailbox => ({
+      worker: source.worker,
+      messages: source.messages.map((message) => ({ ...message })),
+    });
+    const deps = {
+      teamName: 'mailbox-fallback-dedupe',
+      cwd,
+      withMailboxLock: async <T>(_teamName: string, _workerName: string, _cwd: string, fn: () => Promise<T>): Promise<T> => {
+        const previous = lockTail;
+        let release!: () => void;
+        lockTail = new Promise<void>((resolve) => { release = resolve; });
+        await previous;
+        lockHeld = true;
+        try {
+          return await fn();
+        } finally {
+          lockHeld = false;
+          release();
+        }
+      },
+      readMailbox: async (): Promise<TeamMailbox> => copyMailbox({
+        worker: mailbox.worker,
+        messages: mailbox.messages.filter((message) => eventIds.has(message.message_id)),
+      }),
+      readLegacyMailbox: async (): Promise<TeamMailbox> => copyMailbox(mailbox),
+      writeMailbox: async (_teamName: string, updated: TeamMailbox): Promise<void> => {
+        mailbox = copyMailbox(updated);
+        writes += 1;
+      },
+      appendTeamEvent: async (_teamName: string, event: { message_id?: string | null }): Promise<void> => {
+        assert.equal(lockHeld, true, 'fallback ownership evidence must be published under the mailbox lock');
+        events += 1;
+        if (typeof event.message_id === 'string') eventIds.add(event.message_id);
+      },
+      readTeamConfig: async (): Promise<{ created_at: string; workers: Array<{ name: string }> }> => ({
+        created_at: '2000-01-01T00:00:00.000Z',
+        workers: [],
+      }),
+    };
+
+    try {
+      const [first, second] = await Promise.all([
+        sendDirectMessageWithDeps('leader-fixed', 'worker-1', 'same body', deps),
+        sendDirectMessageWithDeps('leader-fixed', 'worker-1', 'same body', deps),
+      ]);
+      assert.equal(first.message_id, second.message_id);
+      assert.equal(mailbox.messages.length, 1);
+      assert.equal(writes, 1);
+      assert.equal(events, 1);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('isolates shared bridge mailboxes and mutations by Team, including repeated recipient names', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-isolation-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('mailbox-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('mailbox-beta', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+
+      for (const recipient of ['worker-1', 'leader-fixed']) {
+        const alpha = await sendDirectMessage('mailbox-alpha', 'worker-1', recipient, 'same body', cwd);
+        // Old readers could have copied Alpha's records into Beta's shadow.
+        const betaShadowPath = join(cwd, '.omx', 'state', 'team', 'mailbox-beta', 'mailbox', `${recipient}.json`);
+        await writeFile(betaShadowPath, JSON.stringify({ worker: recipient, messages: [alpha] }));
+        assert.deepEqual(await listMailboxMessages('mailbox-beta', recipient, cwd), []);
+        const logBefore = await readFile(runtimeLogPath, 'utf8');
+        assert.equal(await markMessageNotified('mailbox-beta', recipient, alpha.message_id, cwd), false);
+        assert.equal(await markMessageDelivered('mailbox-beta', recipient, alpha.message_id, cwd), false);
+        assert.equal(await readFile(runtimeLogPath, 'utf8'), logBefore, 'foreign IDs must not reach the runtime');
+
+        const beta = await sendDirectMessage('mailbox-beta', 'worker-1', recipient, 'same body', cwd);
+        assert.notEqual(alpha.message_id, beta.message_id, 'deduplication must stay within the Team');
+        assert.deepEqual((await listMailboxMessages('mailbox-alpha', recipient, cwd)).map((m) => m.message_id), [alpha.message_id]);
+        assert.deepEqual((await listMailboxMessages('mailbox-beta', recipient, cwd)).map((m) => m.message_id), [beta.message_id]);
+        assert.equal(await markMessageNotified('mailbox-beta', recipient, beta.message_id, cwd), true);
+        assert.equal(await markMessageDelivered('mailbox-beta', recipient, beta.message_id, cwd), true);
+        const [pending] = await listMailboxMessages('mailbox-alpha', recipient, cwd);
+        assert.equal(pending.notified_at, undefined);
+        assert.equal(pending.delivered_at, undefined);
+      }
+      await assert.rejects(() => retireTeamMailboxMessages('mailbox-beta', [], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+      assert.equal(await retireTeamMailboxMessages('mailbox-alpha', [], cwd), 2);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('requires creation evidence for unscoped legacy records even when another Team shadow is polluted', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-legacy-ownership-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('legacy-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('legacy-beta', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const alpha = await sendDirectMessage('legacy-alpha', 'leader-fixed', 'worker-1', 'same', cwd);
+      const beta = await sendDirectMessage('legacy-beta', 'leader-fixed', 'worker-1', 'different', cwd);
+      const orphan = { ...alpha, message_id: 'unproven' };
+      const shadowPath = (team: string) => join(cwd, '.omx', 'state', 'team', team, 'mailbox', 'worker-1.json');
+      await writeFile(shadowPath('legacy-alpha'), JSON.stringify({ worker: 'worker-1', messages: [alpha, orphan] }));
+      await writeFile(shadowPath('legacy-beta'), JSON.stringify({ worker: 'worker-1', messages: [alpha, beta] }));
+      const compatPath = join(cwd, '.omx', 'state', 'mailbox.json');
+      const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<Record<string, unknown>> };
+      for (const record of compat.records) delete record.team_name;
+      compat.records.push({ ...compat.records[0], message_id: orphan.message_id });
+      await writeFile(compatPath, JSON.stringify(compat));
+
+      assert.deepEqual((await listMailboxMessages('legacy-alpha', 'worker-1', cwd)).map((m) => m.message_id), [alpha.message_id]);
+      assert.deepEqual((await listMailboxMessages('legacy-beta', 'worker-1', cwd)).map((m) => m.message_id), [beta.message_id]);
+      assert.equal(await markMessageNotified('legacy-beta', 'worker-1', alpha.message_id, cwd), false);
+      assert.equal(await markMessageDelivered('legacy-beta', 'worker-1', alpha.message_id, cwd), false);
+      const fresh = await sendDirectMessage('legacy-beta', 'leader-fixed', 'worker-1', 'same', cwd);
+      assert.notEqual(fresh.message_id, alpha.message_id, 'polluted shadows must not deduplicate foreign messages');
+      await assert.rejects(() => retireTeamMailboxMessages('legacy-beta', ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+      const remaining = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<{ message_id: string; delivered_at: string | null }> };
+      assert.equal(remaining.records.find((r) => r.message_id === alpha.message_id)?.delivered_at, null);
+      assert.equal(remaining.records.find((r) => r.message_id === orphan.message_id)?.delivered_at, null);
+      assert.equal(await markMessageNotified('legacy-alpha', 'worker-1', alpha.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('legacy-alpha', 'worker-1', alpha.message_id, cwd), true);
+      const shadow = JSON.parse(await readFile(shadowPath('legacy-alpha'), 'utf8')) as { messages: typeof alpha[] };
+      assert.deepEqual(shadow.messages.find((message) => message.message_id === orphan.message_id), JSON.parse(JSON.stringify(orphan)));
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an incompatible runtime before writing a provisional mailbox row', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-send-preflight-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('send-preflight', 't', 'executor', 1, cwd);
+      await sendDirectMessage('send-preflight', 'leader-fixed', 'worker-1', 'existing', cwd);
+      const root = join(cwd, '.omx', 'state');
+      const teamDir = join(root, 'team', 'send-preflight');
+      const shadowPath = join(teamDir, 'mailbox', 'worker-1.json');
+      const eventPath = join(teamDir, 'events', 'events.ndjson');
+      const before = await Promise.all([shadowPath, eventPath, join(root, 'mailbox.json')].map((path) => readFile(path, 'utf8')));
+      const supported = await readFile(runtimePath, 'utf8');
+      await writeFile(runtimePath, supported.replace("capabilities: ['team-mailbox-scope-v1']", 'capabilities: []'));
+      for (const recipient of ['worker-1', 'leader-fixed']) {
+        for (let retry = 0; retry < 2; retry += 1) {
+          await assert.rejects(() => sendDirectMessage('send-preflight', 'leader-fixed', recipient, 'new', cwd), /team-mailbox-scope-v1/);
+          assert.deepEqual(await Promise.all([shadowPath, eventPath, join(root, 'mailbox.json')].map((path) => readFile(path, 'utf8'))), before);
+          assert.equal(existsSync(join(teamDir, 'mailbox', 'leader-fixed.json')), false);
+        }
+      }
+      await writeFile(runtimePath, supported);
+      await sendDirectMessage('send-preflight', 'leader-fixed', 'worker-1', 'new', cwd);
+      assert.equal(await retireTeamMailboxMessages('send-preflight', ['worker-1'], cwd), 2);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('removes only its provisional row if the runtime changes after send preflight', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-send-preflight-race-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('preflight-race', 't', 'executor', 1, cwd);
+      const existing = await sendDirectMessage('preflight-race', 'leader-fixed', 'worker-1', 'existing', cwd);
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'preflight-race', 'mailbox', 'worker-1.json');
+      const recovery = { ...existing, body: 'keep this recovery payload' };
+      await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [recovery, existing] }, null, 2));
+      const before = await readFile(shadowPath, 'utf8');
+      const supported = await readFile(runtimePath, 'utf8');
+      let replaced = false;
+      setWriteAtomicRenameForTests(async (source, destination) => {
+        if (!replaced && destination === shadowPath) {
+          replaced = true;
+          await writeFile(runtimePath, supported.replace("capabilities: ['team-mailbox-scope-v1']", 'capabilities: []'));
+        }
+        await rename(source, destination);
+      });
+      await assert.rejects(() => sendDirectMessage('preflight-race', 'leader-fixed', 'worker-1', 'new', cwd), /team-mailbox-scope-v1/);
+      assert.equal(replaced, true);
+      assert.equal(await readFile(shadowPath, 'utf8'), before);
+      resetWriteAtomicRenameForTests();
+      await writeFile(runtimePath, supported);
+      await assert.rejects(() => retireTeamMailboxMessages('preflight-race', ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+    } finally {
+      resetWriteAtomicRenameForTests();
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('propagates rejected mailbox acknowledgements without changing shadow data', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-rejected-ack-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('ambiguous-ack', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const own = await sendDirectMessage('ambiguous-ack', 'leader-fixed', 'worker-1', 'own', cwd);
+      const compatPath = join(cwd, '.omx', 'state', 'mailbox.json');
+      const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<Record<string, unknown>> };
+      compat.records.push({ ...compat.records[0], body: 'ambiguous' });
+      await writeFile(compatPath, JSON.stringify(compat));
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'ambiguous-ack', 'mailbox', 'worker-1.json');
+      const before = await readFile(shadowPath, 'utf8');
+      const authoritativeBefore = await readFile(compatPath, 'utf8');
+      for (const mutate of [markMessageNotified, markMessageDelivered]) {
+        await assert.rejects(() => mutate('ambiguous-ack', 'worker-1', own.message_id, cwd), /omx-runtime exec-scoped failed/);
+        assert.equal(await readFile(shadowPath, 'utf8'), before);
+        assert.equal(await readFile(compatPath, 'utf8'), authoritativeBefore);
+      }
+      compat.records[0].delivered_at = new Date().toISOString();
+      await writeFile(compatPath, JSON.stringify(compat));
+      await assert.rejects(() => markMessageDelivered('ambiguous-ack', 'worker-1', own.message_id, cwd), /omx-runtime exec-scoped failed/);
+      assert.equal(await readFile(shadowPath, 'utf8'), before);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves colliding recovery rows when mirroring a scoped acknowledgement', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-shadow-collision-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('shadow-collision', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const own = await sendDirectMessage('shadow-collision', 'leader-fixed', 'worker-1', 'own', cwd);
+      const recovery = { ...own, body: 'recover this legacy payload' };
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'shadow-collision', 'mailbox', 'worker-1.json');
+      await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [recovery, recovery, own] }));
+      for (const mutate of [
+        () => markMessageNotified('shadow-collision', 'worker-1', own.message_id, cwd),
+        () => markMessageDelivered('shadow-collision', 'worker-1', own.message_id, cwd),
+      ]) {
+        assert.equal(await mutate(), true);
+        const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+        assert.deepEqual(shadow.messages.filter((message) => message.body === recovery.body), [recovery, recovery].map((message) => JSON.parse(JSON.stringify(message))));
+        assert.equal(shadow.messages.length, 3);
+      }
+      const before = await readFile(shadowPath, 'utf8');
+      for (let retry = 0; retry < 2; retry += 1) {
+        await assert.rejects(() => retireTeamMailboxMessages('shadow-collision', ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+        assert.equal(await readFile(shadowPath, 'utf8'), before);
+        assert.ok(await readTeamConfig('shadow-collision', cwd));
+      }
+      const shadow = JSON.parse(before) as TeamMailbox;
+      shadow.messages = shadow.messages.filter((message) => message.body !== recovery.body);
+      await writeFile(shadowPath, JSON.stringify(shadow));
+      assert.equal(await retireTeamMailboxMessages('shadow-collision', ['worker-1'], cwd), 0);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects colliding legacy IDs even with valid creation evidence for both Teams', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-id-collision-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('collision-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('collision-beta', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const alpha = await sendDirectMessage('collision-alpha', 'leader-fixed', 'worker-1', 'alpha secret', cwd);
+      const beta = await sendDirectMessage('collision-beta', 'leader-fixed', 'worker-1', 'beta secret', cwd);
+      const betaDir = join(cwd, '.omx', 'state', 'team', 'collision-beta');
+      await writeFile(join(betaDir, 'mailbox', 'worker-1.json'), JSON.stringify({
+        worker: 'worker-1', messages: [{ ...beta, message_id: alpha.message_id }],
+      }));
+      const journalPath = join(betaDir, 'events', 'events.ndjson');
+      await writeFile(journalPath, (await readFile(journalPath, 'utf8')).replaceAll(beta.message_id, alpha.message_id));
+      const compatPath = join(cwd, '.omx', 'state', 'mailbox.json');
+      const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<Record<string, unknown>> };
+      for (const record of compat.records) {
+        delete record.team_name;
+        record.message_id = alpha.message_id;
+      }
+      const before = JSON.stringify(compat);
+      await writeFile(compatPath, before);
+      const logBefore = await readFile(runtimeLogPath, 'utf8');
+      for (const team of ['collision-alpha', 'collision-beta']) {
+        assert.deepEqual(await listMailboxMessages(team, 'worker-1', cwd), []);
+        assert.equal(await markMessageNotified(team, 'worker-1', alpha.message_id, cwd), false);
+        assert.equal(await markMessageDelivered(team, 'worker-1', alpha.message_id, cwd), false);
+        await assert.rejects(() => retireTeamMailboxMessages(team, ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+      }
+      assert.equal(await readFile(compatPath, 'utf8'), before);
+      assert.doesNotMatch((await readFile(runtimeLogPath, 'utf8')).slice(logBefore.length), /MarkMailbox/, 'ambiguous IDs must not be acknowledged');
+      const fresh = await sendDirectMessage('collision-beta', 'leader-fixed', 'worker-1', 'beta secret', cwd);
+      assert.notEqual(fresh.message_id, alpha.message_id, 'deduplication must not reuse an ambiguous ID');
+      assert.equal(await markMessageDelivered('collision-beta', 'worker-1', fresh.message_id, cwd), true);
+      const mixed = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<Record<string, unknown>> };
+      mixed.records[1].team_name = 'collision-beta';
+      await writeFile(compatPath, JSON.stringify(mixed));
+      assert.equal((await listMailboxMessages('collision-beta', 'worker-1', cwd))
+        .find((message) => message.message_id === alpha.message_id)?.body, 'beta secret');
+      assert.equal((await listMailboxMessages('collision-alpha', 'worker-1', cwd))
+        .find((message) => message.message_id === alpha.message_id)?.body, 'alpha secret');
+      assert.equal(await markMessageNotified('collision-beta', 'worker-1', alpha.message_id, cwd), true);
+      assert.equal(await retireTeamMailboxMessages('collision-beta', ['worker-1'], cwd), 1);
+      const after = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<{ notified_at: string | null; delivered_at: string | null }> };
+      assert.equal(after.records[0].notified_at, null);
+      assert.equal(after.records[0].delivered_at, null);
+      assert.ok(after.records[1].notified_at);
+      assert.ok(after.records[1].delivered_at);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a proven legacy message when a foreign scoped row reuses its ID', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-foreign-scoped-id-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      await initTeamState('legacy-scope-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('legacy-scope-beta', 't', 'executor', 1, cwd);
+      const own = await sendDirectMessage('legacy-scope-alpha', 'leader-fixed', 'worker-1', 'alpha private message', cwd);
+      const retirement = await sendDirectMessage('legacy-scope-alpha', 'leader-fixed', 'worker-1', 'retirement message', cwd);
+
+      const stateDir = join(cwd, '.omx', 'state');
+      const foreign = [own, retirement].map((message) => ({
+        team_name: 'legacy-scope-beta',
+        message_id: message.message_id,
+        from_worker: 'leader-fixed',
+        to_worker: 'worker-1',
+        body: 'beta private message',
+        created_at: new Date().toISOString(),
+        notified_at: null,
+        delivered_at: null,
+      }));
+      await writeFile(join(stateDir, 'mailbox.json'), JSON.stringify({ records: foreign }));
+      await writeFile(join(stateDir, 'events.json'), '[]');
+      const runtimePath = join(cwd, 'runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+
+      assert.deepEqual((await listMailboxMessages('legacy-scope-alpha', 'worker-1', cwd)).map((message) => message.body), [own.body, retirement.body]);
+      await enqueueDispatchRequest('legacy-scope-alpha', { kind: 'mailbox', to_worker: 'worker-1', worker_index: 1,
+        message_id: own.message_id, trigger_message: 'read own fallback' }, cwd);
+      const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+      await drainPendingTeamDispatch({ cwd, injector: async () => ({ ok: true, reason: 'injected_for_test' }) });
+      assert.equal(typeof (await listMailboxMessages('legacy-scope-alpha', 'worker-1', cwd))
+        .find((message) => message.message_id === own.message_id)?.notified_at, 'string');
+      assert.equal(await markMessageNotified('legacy-scope-alpha', 'worker-1', own.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('legacy-scope-alpha', 'worker-1', own.message_id, cwd), true);
+      assert.equal(await retireTeamMailboxMessages('legacy-scope-alpha', ['worker-1'], cwd), 1);
+
+      const shadowPath = join(stateDir, 'team', 'legacy-scope-alpha', 'mailbox', 'worker-1.json');
+      const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: Array<{ message_id: string; delivered_at?: string }> };
+      assert.equal(typeof shadow.messages.find((message) => message.message_id === own.message_id)?.delivered_at, 'string');
+      assert.equal(typeof shadow.messages.find((message) => message.message_id === retirement.message_id)?.delivered_at, 'string');
+      const compat = JSON.parse(await readFile(join(stateDir, 'mailbox.json'), 'utf8')) as {
+        records: Array<{ team_name: string; message_id: string; delivered_at: string | null }>;
+      };
+      assert.deepEqual(compat.records, foreign);
+      assert.doesNotMatch(await readFile(runtimeLogPath, 'utf8'), /MarkMailbox(Notified|Delivered)/);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps bridge-disabled reads, deduplication, and retirement scoped by Team evidence', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-disabled-bridge-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      await initTeamState('disabled-alpha', 't', 'executor', 1, cwd);
+      await initTeamState('disabled-beta', 't', 'executor', 1, cwd);
+      const foreign = await sendDirectMessage('disabled-beta', 'leader-fixed', 'worker-1', 'foreign private data', cwd);
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'disabled-alpha', 'mailbox', 'worker-1.json');
+      await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [foreign] }));
+
+      assert.deepEqual(await listMailboxMessages('disabled-alpha', 'worker-1', cwd), []);
+      assert.equal(await markMessageNotified('disabled-alpha', 'worker-1', foreign.message_id, cwd), false);
+      assert.equal(await markMessageDelivered('disabled-alpha', 'worker-1', foreign.message_id, cwd), false);
+      const beforeRetirement = await readFile(shadowPath, 'utf8');
+      await assert.rejects(() => retireTeamMailboxMessages('disabled-alpha', ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+      assert.equal(await readFile(shadowPath, 'utf8'), beforeRetirement);
+
+      const own = await sendDirectMessage('disabled-alpha', 'leader-fixed', 'worker-1', 'foreign private data', cwd);
+      assert.notEqual(own.message_id, foreign.message_id, 'unproven foreign shadows must not deduplicate local sends');
+      assert.deepEqual((await listMailboxMessages('disabled-alpha', 'worker-1', cwd)).map((message) => message.message_id), [own.message_id]);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('reads and retires scoped bridge messages when their compatibility shadow is missing', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-missing-shadow-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      await initTeamState('scoped-alpha', 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const message = await sendDirectMessage('scoped-alpha', 'leader-fixed', 'worker-1', 'durable', cwd);
+      await unlink(join(cwd, '.omx', 'state', 'team', 'scoped-alpha', 'mailbox', 'worker-1.json'));
+      assert.equal((await listMailboxMessages('scoped-alpha', 'worker-1', cwd))[0]?.message_id, message.message_id);
+      assert.equal(await retireTeamMailboxMessages('scoped-alpha', ['worker-1'], cwd), 1);
+      assert.equal(typeof (await listMailboxMessages('scoped-alpha', 'worker-1', cwd))[0]?.delivered_at, 'string');
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('retires a unique scoped provisional shadow without a creation journal', async () => {
+    for (const action of ['retire', 'notify', 'deliver', 'hook']) {
+      const cwd = await mkdtemp(join(tmpdir(), 'omx-provisional-retire-'));
+      const previousBinary = process.env.OMX_RUNTIME_BINARY;
+      const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+      try {
+        const runtime = join(cwd, 'runtime');
+        await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+        process.env.OMX_RUNTIME_BINARY = runtime;
+        process.env.OMX_RUNTIME_BRIDGE = '1';
+        await initTeamState('alpha', 'task', 'executor', 1, cwd);
+        const message = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'provisional', cwd);
+        const shadowPath = join(cwd, '.omx/state/team/alpha/mailbox/worker-1.json');
+        await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [{ ...message, created_at: '2000-01-01T00:00:00Z' }] }));
+        await writeFile(join(cwd, '.omx/state/team/alpha/events/events.ndjson'), '');
+        if (action === 'notify') assert.equal(await markMessageNotified('alpha', 'worker-1', message.message_id, cwd), true);
+        if (action === 'deliver') assert.equal(await markMessageDelivered('alpha', 'worker-1', message.message_id, cwd), true);
+        if (action === 'hook') {
+          await enqueueDispatchRequest('alpha', { kind: 'mailbox', to_worker: 'worker-1', worker_index: 1,
+            message_id: message.message_id, trigger_message: 'read provisional' }, cwd);
+          const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+          assert.equal((await drainPendingTeamDispatch({ cwd,
+            injector: async () => ({ ok: true, reason: 'injected_for_test' }) })).processed, 1);
+        }
+        assert.equal(JSON.parse(await readFile(shadowPath, 'utf8')).messages.length, 1);
+        assert.equal(await retireTeamMailboxMessages('alpha', ['worker-1'], cwd), action === 'deliver' ? 0 : 1);
+        const shadow = JSON.parse(await readFile(shadowPath, 'utf8'));
+        assert.equal(shadow.messages.length, 1);
+        assert.ok(shadow.messages[0].delivered_at);
+        assert.ok((await listMailboxMessages('alpha', 'worker-1', cwd))[0].delivered_at);
+      } finally {
+        if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+        else process.env.OMX_RUNTIME_BINARY = previousBinary;
+        if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+        else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('refreshes durable mailbox creations before retiring fallback shadows', async () => {
+    for (const shadowState of ['pending', 'delivered', 'missing']) {
+      const cwd = await mkdtemp(join(tmpdir(), 'omx-retire-stale-projection-'));
+      const previousBinary = process.env.OMX_RUNTIME_BINARY;
+      const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+      const previousCapture = process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+      try {
+        process.env.OMX_RUNTIME_BRIDGE = '0';
+        await initTeamState('alpha', 'task', 'executor', 1, cwd);
+        const message = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'interrupted creation', cwd);
+        if (shadowState === 'delivered') assert.equal(await markMessageDelivered('alpha', 'worker-1', message.message_id, cwd), true);
+        const stateDir = join(cwd, '.omx/state');
+        await writeFile(join(stateDir, 'mailbox.json'), JSON.stringify({ records: [{ ...message, team_name: 'beta', notified_at: null, delivered_at: null }] }));
+        await writeFile(join(stateDir, 'events.json'), JSON.stringify([{ ...message, event: 'MailboxMessageCreated', team_name: 'alpha' }]));
+        process.env.OMX_RUNTIME_BRIDGE = '1';
+        process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+        const shadowPath = join(stateDir, 'team/alpha/mailbox/worker-1.json');
+        if (shadowState === 'missing') await rm(shadowPath);
+        const before = await readFile(shadowPath, 'utf8').catch(() => null);
+        await assert.rejects(() => retireTeamMailboxMessages('alpha', ['worker-1'], cwd));
+        assert.equal(await readFile(shadowPath, 'utf8').catch(() => null), before);
+        const runtime = join(cwd, 'runtime');
+        await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+        process.env.OMX_RUNTIME_BINARY = runtime;
+        process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = '1';
+        assert.equal(await retireTeamMailboxMessages('alpha', [], cwd), shadowState === 'delivered' ? 0 : 1);
+        const records = JSON.parse(await readFile(join(stateDir, 'mailbox.json'), 'utf8')).records;
+        assert.equal(records.length, 2);
+        assert.equal(records[0].team_name, 'beta');
+        assert.equal(records[0].delivered_at, null);
+        assert.equal(records[1].team_name, 'alpha');
+        assert.ok(records[1].delivered_at);
+      } finally {
+        if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+        else process.env.OMX_RUNTIME_BINARY = previousBinary;
+        if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+        else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+        if (previousCapture === undefined) delete process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+        else process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = previousCapture;
+        await rm(cwd, { recursive: true, force: true });
+    }
+    }
+  });
+
+  it('journals runtime finalization while event and compatibility files are mid-write', async () => {
+    const { recordRuntimeFinalization } = await import('../state/dispatch-recovery.js');
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-finalization-identity-'));
+    const command = { command: 'MarkNotified' as const, request_id: 'owned', channel: 'tmux' };
+    const journal = join(cwd, 'team/alpha/dispatch/runtime-finalizations.jsonl');
+    try {
+      await writeFile(join(cwd, 'events.json'), '[{"event":');
+      await writeFile(join(cwd, 'dispatch.json'), '{"records":');
+      recordRuntimeFinalization(cwd, 'alpha', command);
+      assert.equal(existsSync(journal), false);
+      for (const version of [{ schema_version: 1 }, { schema_version: 2, ledger_epoch: 1 }]) {
+        await writeFile(join(cwd, 'dispatch-seen.json'), JSON.stringify({ ...version, request_ids: ['owned'] }));
+        recordRuntimeFinalization(cwd, 'alpha', { ...command, request_id: 'json-only' });
+        assert.equal(existsSync(journal), false);
+        recordRuntimeFinalization(cwd, 'alpha', command);
+        assert.deepEqual(JSON.parse((await readFile(journal, 'utf8')).trim()), command);
+        await unlink(journal);
+      }
+      await writeFile(join(cwd, 'dispatch-seen.json'), JSON.stringify({ schema_version: 2, ledger_epoch: 99, request_ids: ['owned'] }));
+      assert.throws(() => recordRuntimeFinalization(cwd, 'alpha', command), /invalid runtime dispatch identity ledger/);
+      assert.equal(existsSync(journal), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects QueueDispatch schema failures without polluting existing runtime state', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-queue-schema-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtime = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      await enqueueDispatchRequest('alpha', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'existing' }, cwd);
+      const files = ['dispatch.json', 'events.json', 'team/alpha/dispatch/requests.json'];
+      const before = await Promise.all(files.map(f => readFile(join(cwd, '.omx/state', f), 'utf8')));
+      for (const probe of [
+        'console.log(JSON.stringify({version:1,capabilities:[]}));',
+        'process.exit(1);',
+        'process.kill(process.pid, "SIGTERM");',
+      ]) {
+        await writeFile(runtime, `#!/usr/bin/env node\n${probe}\n`);
+        await assert.rejects(() => enqueueDispatchRequest('alpha', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'rejected' }, cwd), /team-mailbox-scope-v1|schema failed/);
+        assert.deepEqual(await Promise.all(files.map(f => readFile(join(cwd, '.omx/state', f), 'utf8'))), before);
+      }
+
+      await rm(runtime);
+      await assert.rejects(() => enqueueDispatchRequest('alpha', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'missing binary' }, cwd));
+      assert.deepEqual(await Promise.all(files.map(f => readFile(join(cwd, '.omx/state', f), 'utf8'))), before);
+      await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+      await chmod(runtime, 0o644);
+      await assert.rejects(() => enqueueDispatchRequest('alpha', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'not executable' }, cwd));
+      assert.deepEqual(await Promise.all(files.map(f => readFile(join(cwd, '.omx/state', f), 'utf8'))), before);
+
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects cross-source identity collisions with a single unscoped runtime record', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-cross-source-collision-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const own = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'alpha fallback', cwd);
+      const runtime = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const path = join(cwd, '.omx/state/mailbox.json');
+      const record = { ...own, team_name: null, body: 'foreign secret', notified_at: null, delivered_at: null };
+      for (const conflict of [record, { ...record, body: own.body, to_worker: 'worker-2' }]) {
+        await writeFile(path, JSON.stringify({ records: [conflict] }));
+        const before = await readFile(path, 'utf8');
+        assert.deepEqual(await listMailboxMessages('alpha', 'worker-1', cwd), []);
+        assert.equal(await markMessageNotified('alpha', 'worker-1', own.message_id, cwd), false);
+        assert.equal(await markMessageDelivered('alpha', 'worker-1', own.message_id, cwd), false);
+        await assert.rejects(() => retireTeamMailboxMessages('alpha', ['worker-1'], cwd), /authoritative_mailbox_retirement_discovery_failed/);
+        await enqueueDispatchRequest('alpha', { kind: 'mailbox', to_worker: 'worker-1', worker_index: 1,
+          message_id: own.message_id, trigger_message: 'read collision ' + conflict.to_worker }, cwd);
+        const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+        await drainPendingTeamDispatch({ cwd, injector: async () => ({ ok: true, reason: 'injected_for_test' }) });
+        assert.equal(await readFile(path, 'utf8'), before);
+        const shadow = JSON.parse(await readFile(join(cwd, '.omx/state/team/alpha/mailbox/worker-1.json'), 'utf8'));
+        assert.equal(shadow.messages[0].notified_at, undefined);
+        assert.equal(shadow.messages[0].delivered_at, undefined);
+      }
+      // Historical timestamp drift and missing event bodies remain recoverable.
+      await writeFile(path, JSON.stringify({ records: [{ ...record, body: '', created_at: '2000-01-01T00:00:00Z' }] }));
+      assert.equal((await listMailboxMessages('alpha', 'worker-1', cwd))[0].body, own.body);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves proven fallback messages alongside existing bridge records', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-mixed-mailbox-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtime = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      await initTeamState('beta', 'task', 'executor', 1, cwd);
+      const original = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'runtime owned', cwd);
+      const foreign = await sendDirectMessage('beta', 'leader-fixed', 'worker-1', 'foreign', cwd);
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      const fallback = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'fallback', cwd);
+      const retire = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'retire fallback', cwd);
+      const shadowPath = join(cwd, '.omx/state/team/alpha/mailbox/worker-1.json');
+      const shadow = JSON.parse(await readFile(shadowPath, 'utf8'));
+      shadow.messages.push(foreign);
+      await writeFile(shadowPath, JSON.stringify(shadow));
+      assert.deepEqual((await listMailboxMessages('alpha', 'worker-1', cwd)).map(m => m.message_id),
+        [original.message_id, fallback.message_id, retire.message_id]);
+      await assert.rejects(() => markMessageNotified('alpha', 'worker-1', fallback.message_id, cwd));
+      await assert.rejects(() => markMessageDelivered('alpha', 'worker-1', fallback.message_id, cwd));
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      assert.equal(await markMessageNotified('alpha', 'worker-1', fallback.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('alpha', 'worker-1', fallback.message_id, cwd), true);
+      const afterRestore = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'retire fallback', cwd);
+      assert.equal(afterRestore.message_id, retire.message_id);
+      assert.equal(await markMessageNotified('alpha', 'worker-1', retire.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('alpha', 'worker-1', retire.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('alpha', 'worker-1', foreign.message_id, cwd), false);
+      assert.equal((await listMailboxMessages('beta', 'worker-1', cwd))[0].delivered_at, undefined);
+      const records = JSON.parse(await readFile(join(cwd, '.omx/state/mailbox.json'), 'utf8')).records;
+      assert.equal(records.some((r: { message_id: string }) => r.message_id === fallback.message_id), false);
+      const cleaned = JSON.parse(await readFile(shadowPath, 'utf8'));
+      cleaned.messages = cleaned.messages.filter((m: { message_id: string }) => m.message_id !== foreign.message_id);
+      await writeFile(shadowPath, JSON.stringify(cleaned));
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      const pending = await sendDirectMessage('alpha', 'leader-fixed', 'worker-1', 'pending retirement', cwd);
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      assert.equal(await retireTeamMailboxMessages('alpha', ['worker-1'], cwd), 2);
+      assert.ok((await listMailboxMessages('alpha', 'worker-1', cwd)).find(m => m.message_id === pending.message_id)?.delivered_at);
+      assert.equal((await listMailboxMessages('beta', 'worker-1', cwd))[0].delivered_at, undefined);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers delivered dispatch receipts after a runtime downgrade and replay', async () => {
+    for (const initialStatus of ['pending', 'notified']) {
+      const cwd = await mkdtemp(join(tmpdir(), 'omx-delivered-recovery-'));
+      const previousBinary = process.env.OMX_RUNTIME_BINARY;
+      const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+      try {
+        const runtime = join(cwd, 'runtime');
+        const log = join(cwd, 'runtime.log');
+        await writeCompatRuntimeFixture(runtime, log);
+        process.env.OMX_RUNTIME_BINARY = runtime;
+        process.env.OMX_RUNTIME_BRIDGE = '1';
+        await initTeamState('alpha', 'task', 'executor', 1, cwd);
+        const request = (await enqueueDispatchRequest('alpha', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'receipt' }, cwd)).request;
+        if (initialStatus === 'notified') await markDispatchRequestNotified('alpha', request.request_id, {}, cwd);
+        await writeFile(runtime, '#!/usr/bin/env node\nconsole.log(JSON.stringify({version:1,capabilities:[]}));\n');
+        if (initialStatus === 'pending') {
+          assert.equal(await markDispatchRequestDelivered('alpha', request.request_id, {}, cwd), null);
+          await markDispatchRequestNotified('alpha', request.request_id, {}, cwd);
+        }
+        assert.equal((await markDispatchRequestDelivered('alpha', request.request_id, {}, cwd))?.status, 'delivered');
+        const stateDir = join(cwd, '.omx/state');
+        const journal = join(stateDir, 'team/alpha/dispatch/runtime-finalizations.jsonl');
+        assert.equal(JSON.parse((await readFile(journal, 'utf8')).trim().split('\n').at(-1)!).command, 'MarkDelivered');
+        await writeCompatRuntimeFixture(runtime, log);
+        const projection = JSON.parse(await readFile(join(stateDir, 'dispatch.json'), 'utf8'));
+        projection.records[0].status = initialStatus;
+        await writeFile(join(stateDir, 'dispatch.json'), JSON.stringify(projection));
+        const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+        await drainPendingTeamDispatch({ cwd, injector: async () => { assert.fail('delivered request reinjected'); } });
+        assert.equal((await readDispatchRequest('alpha', request.request_id, cwd))?.status, 'delivered');
+        assert.equal(existsSync(journal), false);
+      } finally {
+        if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+        else process.env.OMX_RUNTIME_BINARY = previousBinary;
+        if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+        else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('journals dispatch finalizations when the runtime is unavailable', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-dispatch-transport-recovery-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const runtime = join(cwd, 'runtime');
+      const missingRuntime = join(cwd, 'missing-runtime');
+      await writeCompatRuntimeFixture(runtime, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const request = (await enqueueDispatchRequest('alpha', {
+        kind: 'inbox', to_worker: 'worker-1', trigger_message: 'transport recovery',
+      }, cwd)).request;
+      await markDispatchRequestNotified('alpha', request.request_id, {}, cwd);
+
+      process.env.OMX_RUNTIME_BINARY = missingRuntime;
+      assert.equal((await markDispatchRequestDelivered('alpha', request.request_id, {}, cwd))?.status, 'delivered');
+      const stateDir = join(cwd, '.omx', 'state');
+      const journal = join(stateDir, 'team', 'alpha', 'dispatch', 'runtime-finalizations.jsonl');
+      assert.equal(JSON.parse((await readFile(journal, 'utf8')).trim()).command, 'MarkDelivered');
+
+      process.env.OMX_RUNTIME_BINARY = runtime;
+      const projection = JSON.parse(await readFile(join(stateDir, 'dispatch.json'), 'utf8'));
+      projection.records[0].status = 'notified';
+      await writeFile(join(stateDir, 'dispatch.json'), JSON.stringify(projection));
+      const { drainPendingTeamDispatch } = await import('../../scripts/notify-hook/team-dispatch.js');
+      await drainPendingTeamDispatch({ cwd, injector: async () => { assert.fail('delivered request reinjected'); } });
+      assert.equal((await readDispatchRequest('alpha', request.request_id, cwd))?.status, 'delivered');
+      assert.equal(existsSync(journal), false);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('acknowledges proven JSON-only messages after a compatible runtime is enabled', async () => {
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      for (const creationMode of ['disabled', 'unavailable']) {
+        const cwd = await mkdtemp(join(tmpdir(), 'omx-legacy-ack-enable-'));
+        try {
+          process.env.OMX_RUNTIME_BRIDGE = creationMode === 'disabled' ? '0' : '1';
+          process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+          await initTeamState('legacy-ack', 'task', 'executor', 1, cwd);
+          const own = await sendDirectMessage('legacy-ack', 'leader-fixed', 'worker-1', 'legacy only', cwd);
+          const orphan = { ...own, message_id: 'unproven-orphan', body: 'keep for recovery' };
+          const shadowPath = join(cwd, '.omx', 'state', 'team', 'legacy-ack', 'mailbox', 'worker-1.json');
+          await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [own, orphan] }));
+          const runtimePath = join(cwd, 'runtime');
+          const runtimeLogPath = join(cwd, 'runtime.log');
+          await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+          process.env.OMX_RUNTIME_BINARY = runtimePath;
+          process.env.OMX_RUNTIME_BRIDGE = '1';
+          assert.equal(existsSync(join(cwd, '.omx', 'state', 'mailbox.json')), false);
+          assert.deepEqual((await listMailboxMessages('legacy-ack', 'worker-1', cwd)).map((message) => message.message_id), [own.message_id]);
+          for (const name of ['events.json', 'snapshot.json', 'mailbox.json']) {
+            const authorityPath = join(cwd, '.omx', 'state', name);
+            await writeFile(authorityPath, '{invalid');
+            await assert.rejects(() => markMessageNotified('legacy-ack', 'worker-1', own.message_id, cwd), /omx-runtime exec-scoped failed/);
+            await assert.rejects(() => markMessageDelivered('legacy-ack', 'worker-1', own.message_id, cwd), /omx-runtime exec-scoped failed/);
+            await rm(authorityPath);
+          }
+          const runtimeLogBefore = await readFile(runtimeLogPath, 'utf8');
+          assert.equal(await markMessageNotified('legacy-ack', 'worker-1', own.message_id, cwd), true);
+          assert.equal(await markMessageDelivered('legacy-ack', 'worker-1', own.message_id, cwd), true);
+          assert.equal(await markMessageNotified('legacy-ack', 'worker-1', orphan.message_id, cwd), false);
+          assert.equal(await markMessageDelivered('legacy-ack', 'worker-1', orphan.message_id, cwd), false);
+          const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+          assert.ok(shadow.messages[0].notified_at);
+          assert.ok(shadow.messages[0].delivered_at);
+          assert.deepEqual(shadow.messages[1], JSON.parse(JSON.stringify(orphan)));
+          assert.doesNotMatch((await readFile(runtimeLogPath, 'utf8')).slice(runtimeLogBefore.length), /MarkMailbox(Notified|Delivered)/);
+        } finally { await rm(cwd, { recursive: true, force: true }); }
+      }
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+    }
+  });
+
+  it('materializes existing runtime authority before acknowledging a JSON-only mailbox message', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-legacy-ack-existing-runtime-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const previousMaterialize = process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      await initTeamState('legacy-ack-authority', 'task', 'executor', 1, cwd);
+      const own = await sendDirectMessage('legacy-ack-authority', 'leader-fixed', 'worker-1', 'legacy only', cwd);
+      const runtimeStateDir = join(cwd, '.omx', 'state');
+      await writeFile(join(runtimeStateDir, 'events.json'), '[]');
+
+      const runtimePath = join(cwd, 'runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = '1';
+
+      assert.equal(await markMessageNotified('legacy-ack-authority', 'worker-1', own.message_id, cwd), true);
+      assert.equal(await markMessageDelivered('legacy-ack-authority', 'worker-1', own.message_id, cwd), true);
+      const shadowPath = join(runtimeStateDir, 'team', 'legacy-ack-authority', 'mailbox', 'worker-1.json');
+      const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+      assert.ok(shadow.messages[0]?.notified_at);
+      assert.ok(shadow.messages[0]?.delivered_at);
+      assert.deepEqual(JSON.parse(await readFile(join(runtimeStateDir, 'mailbox.json'), 'utf8')), { records: [] });
+      assert.match(await readFile(runtimeLogPath, 'utf8'), /CaptureSnapshot/);
+      assert.doesNotMatch(await readFile(runtimeLogPath, 'utf8'), /MarkMailbox(Notified|Delivered)/);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      if (previousMaterialize === undefined) delete process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+      else process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = previousMaterialize;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes a stale projection without confusing a foreign scoped collision for the legacy row', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-legacy-ack-stale-projection-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const previousMaterialize = process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      await initTeamState('legacy-ack-stale', 'task', 'executor', 1, cwd);
+      const own = await sendDirectMessage('legacy-ack-stale', 'leader-fixed', 'worker-1', 'alpha private message', cwd);
+      const runtimeStateDir = join(cwd, '.omx', 'state');
+      await writeFile(join(runtimeStateDir, 'events.json'), JSON.stringify([{
+        event: 'MailboxMessageCreated',
+        team_name: 'foreign-team',
+        message_id: own.message_id,
+        from_worker: 'leader-fixed',
+        to_worker: 'worker-1',
+        body: 'foreign message',
+      }]));
+      await writeFile(join(runtimeStateDir, 'mailbox.json'), JSON.stringify({ records: [] }));
+
+      const runtimePath = join(cwd, 'runtime');
+      const runtimeLogPath = join(cwd, 'runtime.log');
+      await writeCompatRuntimeFixture(runtimePath, runtimeLogPath);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = '1';
+
+      assert.deepEqual((await listMailboxMessages('legacy-ack-stale', 'worker-1', cwd)).map((message) => message.body), [own.body]);
+      const shadowPath = join(runtimeStateDir, 'team', 'legacy-ack-stale', 'mailbox', 'worker-1.json');
+      assert.equal(await markMessageNotified('legacy-ack-stale', 'worker-1', own.message_id, cwd), true);
+      const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+      assert.ok(shadow.messages[0]?.notified_at);
+      const compat = JSON.parse(await readFile(join(runtimeStateDir, 'mailbox.json'), 'utf8')) as {
+        records: Array<{ team_name: string; message_id: string; body: string }>;
+      };
+      assert.deepEqual(compat.records.map(({ team_name, message_id, body }) => ({ team_name, message_id, body })), [{
+        team_name: 'foreign-team', message_id: own.message_id, body: 'foreign message',
+      }]);
+      assert.deepEqual((await listMailboxMessages('legacy-ack-stale', 'worker-1', cwd)).map((message) => message.body), [own.body]);
+      assert.doesNotMatch(await readFile(runtimeLogPath, 'utf8'), /MarkMailboxNotified/);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      if (previousMaterialize === undefined) delete process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+      else process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = previousMaterialize;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects acknowledgements when stale mailbox refresh loses the runtime after schema validation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-stale-mailbox-refresh-transport-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    const previousMaterialize = process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+    try {
+      const teamName = 'refresh-transport';
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      await initTeamState(teamName, 'task', 'executor', 1, cwd);
+      const message = await sendDirectMessage(teamName, 'leader-fixed', 'worker-1', 'durable creation', cwd);
+      const stateDir = join(cwd, '.omx', 'state');
+      const shadowPath = join(stateDir, 'team', teamName, 'mailbox', 'worker-1.json');
+      const compatPath = join(stateDir, 'mailbox.json');
+      await writeFile(join(stateDir, 'events.json'), JSON.stringify([{
+        ...message, event: 'MailboxMessageCreated', team_name: teamName,
+      }]));
+      await writeFile(compatPath, JSON.stringify({ records: [] }));
+      const shadowBefore = await readFile(shadowPath, 'utf8');
+      const compatBefore = await readFile(compatPath, 'utf8');
+      const runtimePath = join(cwd, 'runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      const runtime = await readFile(runtimePath, 'utf8');
+      const disappearingRuntime = runtime.replace("if (argv[0] === 'schema') {",
+        "if (argv[0] === 'schema') { fs.unlinkSync(process.argv[1]);");
+      assert.notEqual(disappearingRuntime, runtime);
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = '1';
+      for (const mutate of [markMessageNotified, markMessageDelivered]) {
+        await writeFile(runtimePath, disappearingRuntime, { mode: 0o755 });
+        await assert.rejects(() => mutate(teamName, 'worker-1', message.message_id, cwd), /omx-runtime exec-scoped failed/);
+        assert.equal(await readFile(shadowPath, 'utf8'), shadowBefore);
+        assert.equal(await readFile(compatPath, 'utf8'), compatBefore);
+      }
+      await writeFile(runtimePath, runtime, { mode: 0o755 });
+      assert.equal(await markMessageNotified(teamName, 'worker-1', message.message_id, cwd), true);
+      assert.equal(await markMessageDelivered(teamName, 'worker-1', message.message_id, cwd), true);
+      assert.ok(JSON.parse(await readFile(compatPath, 'utf8')).records[0].delivered_at);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      if (previousMaterialize === undefined) delete process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE;
+      else process.env.OMX_TEST_MATERIALIZE_MAILBOX_ON_CAPTURE = previousMaterialize;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report authoritative acknowledgement success when runtime transport fails', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-ack-transport-'));
+    const previousBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      const teamName = 'ack-transport';
+      await initTeamState(teamName, 't', 'executor', 1, cwd);
+      const runtimePath = join(cwd, 'omx-runtime');
+      await writeCompatRuntimeFixture(runtimePath, join(cwd, 'runtime.log'));
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      const message = await sendDirectMessage(teamName, 'leader-fixed', 'worker-1', 'pending', cwd);
+      const stateDir = join(cwd, '.omx', 'state');
+      const shadowPath = join(stateDir, 'team', teamName, 'mailbox', 'worker-1.json');
+      const shadowBefore = await readFile(shadowPath, 'utf8');
+      const compatPath = join(stateDir, 'mailbox.json');
+      const compatBefore = await readFile(compatPath, 'utf8');
+
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      await assert.rejects(() => markMessageNotified(teamName, 'worker-1', message.message_id, cwd), /omx-runtime schema failed/);
+      await assert.rejects(() => markMessageDelivered(teamName, 'worker-1', message.message_id, cwd), /omx-runtime schema failed/);
+      assert.equal(await readFile(shadowPath, 'utf8'), shadowBefore);
+      assert.equal(await readFile(compatPath, 'utf8'), compatBefore);
+
+      process.env.OMX_RUNTIME_BINARY = runtimePath;
+      assert.equal(await markMessageNotified(teamName, 'worker-1', message.message_id, cwd), true);
+      assert.equal(await markMessageDelivered(teamName, 'worker-1', message.message_id, cwd), true);
+    } finally {
+      if (previousBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousBinary;
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves unproven shadow records when notifying and delivering through the JSON fallback', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-mailbox-fallback-preserve-'));
+    const previousRuntimeBinary = process.env.OMX_RUNTIME_BINARY;
+    const previousRuntimeBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '0';
+      await initTeamState('fallback-alpha', 't', 'executor', 1, cwd);
+      const own = await sendDirectMessage('fallback-alpha', 'leader-fixed', 'worker-1', 'own', cwd);
+      const orphan = { ...own, message_id: 'crashed-before-creation-event', body: 'recover me' };
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'fallback-alpha', 'mailbox', 'worker-1.json');
+      await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [own, orphan] }));
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      process.env.OMX_RUNTIME_BINARY = join(cwd, 'missing-runtime');
+      assert.deepEqual((await listMailboxMessages('fallback-alpha', 'worker-1', cwd)).map((m) => m.message_id), [own.message_id]);
+      for (const mutate of [markMessageNotified, markMessageDelivered]) {
+        assert.equal(await mutate('fallback-alpha', 'worker-1', own.message_id, cwd), true);
+        const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+        assert.deepEqual(shadow.messages.find((message) => message.message_id === orphan.message_id), JSON.parse(JSON.stringify(orphan)));
+        assert.deepEqual((await listMailboxMessages('fallback-alpha', 'worker-1', cwd)).map((m) => m.message_id), [own.message_id]);
+      }
+      for (const records of [{}, [null]]) {
+        await writeFile(join(cwd, '.omx', 'state', 'mailbox.json'), JSON.stringify({ records }));
+        const fresh = await sendDirectMessage('fallback-alpha', 'leader-fixed', 'worker-1', JSON.stringify(records), cwd);
+        assert.notEqual(fresh.message_id, orphan.message_id);
+        assert.ok((await listMailboxMessages('fallback-alpha', 'worker-1', cwd)).some((message) => message.message_id === fresh.message_id));
+        const shadow = JSON.parse(await readFile(shadowPath, 'utf8')) as { messages: typeof own[] };
+        assert.deepEqual(shadow.messages.find((message) => message.message_id === orphan.message_id), JSON.parse(JSON.stringify(orphan)));
+      }
+      await writeFile(shadowPath, JSON.stringify({ worker: 'worker-1', messages: [own, { ...own, body: 'ambiguous' }] }));
+      assert.deepEqual(await listMailboxMessages('fallback-alpha', 'worker-1', cwd), []);
+      assert.equal(await markMessageDelivered('fallback-alpha', 'worker-1', own.message_id, cwd), false);
+    } finally {
+      if (previousRuntimeBinary === undefined) delete process.env.OMX_RUNTIME_BINARY;
+      else process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
+      if (previousRuntimeBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -2028,13 +3426,18 @@ exit 1
       const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<Record<string, unknown>> };
       const record = compat.records.find((entry) => entry.message_id === message.message_id);
       assert.ok(record);
-      record.body = null;
-      await writeFile(compatPath, JSON.stringify(compat, null, 2));
-
-      await assert.rejects(
-        retireTeamMailboxMessages('team-retire-malformed-record', ['worker-1'], cwd),
-        /authoritative_mailbox_retirement_discovery_failed/,
-      );
+      const original = { ...record };
+      const shadowPath = join(cwd, '.omx', 'state', 'team', 'team-retire-malformed-record', 'mailbox', 'worker-1.json');
+      const shadowBefore = await readFile(shadowPath, 'utf8');
+      for (const invalid of [{ body: null }, ...[0, false, {}, [], '', ' ', 'invalid/name'].map((team_name) => ({ team_name }))]) {
+        Object.assign(record, original, invalid);
+        await writeFile(compatPath, JSON.stringify(compat, null, 2));
+        await assert.rejects(
+          retireTeamMailboxMessages('team-retire-malformed-record', ['worker-1'], cwd),
+          /authoritative_mailbox_retirement_discovery_failed/,
+        );
+        assert.equal(await readFile(shadowPath, 'utf8'), shadowBefore);
+      }
       assert.equal((await readFile(runtimeLogPath, 'utf8')).split('MarkMailboxDelivered').length - 1, 0);
     } finally {
       if (typeof previousRuntimeBinary === 'string') process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
@@ -2138,13 +3541,13 @@ exit 1
       assert.equal(typeof messages[0]?.delivered_at, 'string');
 
       assert.equal(existsSync(legacyPath), true, 'bridge-success path should shadow-write legacy mailbox JSON for body recovery');
-      const after = JSON.parse(await readFile(legacyPath, 'utf8')) as { messages: Array<{ message_id: string; body: string }> };
+      const after = JSON.parse(await readFile(legacyPath, 'utf8')) as { messages: Array<{ message_id: string; body: string; created_at: string }> };
       assert.equal(after.messages.length, 1);
       assert.equal(after.messages[0]?.message_id, message.message_id);
       assert.equal(after.messages[0]?.body, 'hello');
 
       const compatPath = join(cwd, '.omx', 'state', 'mailbox.json');
-      const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<{ message_id: string; body: string }> };
+      const compat = JSON.parse(await readFile(compatPath, 'utf8')) as { records: Array<{ message_id: string; body: string; created_at: string }> };
       const compatRecord = compat.records.find((entry) => entry.message_id === message.message_id);
       assert.ok(compatRecord);
 
@@ -2157,11 +3560,16 @@ exit 1
       assert.equal(deliveredCallsAfter, deliveredCallsBefore, 'idempotent delivered calls should not invoke bridge a second time');
 
       compatRecord!.body = '';
+      compatRecord!.created_at = '2026-01-01T00:00:00.000Z';
       await writeFile(compatPath, JSON.stringify(compat, null, 2));
 
       const recovered = await listMailboxMessages('team-mailbox-bridge-authority', 'worker-2', cwd);
       assert.equal(recovered.length, 1);
       assert.equal(recovered[0]?.body, 'hello', 'legacy shadow mailbox should backfill blank compat bodies');
+      assert.equal(await markMessageNotified('team-mailbox-bridge-authority', 'worker-2', message.message_id, cwd), true);
+      const repairedShadow = JSON.parse(await readFile(legacyPath, 'utf8')) as { messages: Array<{ created_at: string }> };
+      assert.equal(repairedShadow.messages.length, 1, 'old runtime clock drift must not duplicate a proven shadow');
+      assert.equal(repairedShadow.messages[0].created_at, after.messages[0].created_at);
     } finally {
       if (typeof previousRuntimeBinary === 'string') process.env.OMX_RUNTIME_BINARY = previousRuntimeBinary;
       else delete process.env.OMX_RUNTIME_BINARY;

@@ -66,9 +66,10 @@ import {
 	readUltragoalPlan,
 } from "../../ultragoal/artifacts.js";
 import { getBaseStateDir } from "../../state/paths.js";
-import { recordNativeSubagentAuthorityObservation } from "../../subagents/tracker.js";
+import { readSubagentTrackingState, recordNativeSubagentAuthorityObservation } from "../../subagents/tracker.js";
 import { maybeNudgeLeaderForAllowedWorkerStop } from "../notify-hook/team-worker-stop.js";
 import { MAX_NATIVE_STDIN_JSON_BYTES } from "../hook-payload-guard.js";
+import { generateOverlay, writeSessionModelInstructionsFile } from "../../hooks/agents-overlay.js";
 import {
 	injectExecFollowup,
 	markExecFollowupsDelivered,
@@ -466,6 +467,7 @@ async function configureAuthoritativeTeamWorker(
   cwd: string,
   teamName: string,
   workerPaneId = "%10",
+  workerCwd = cwd,
 ): Promise<void> {
   const stateRoot = join(cwd, ".omx", "state");
   await initTeamState(teamName, "session pointer ownership regression", "executor", 1, cwd, undefined, {
@@ -486,8 +488,8 @@ async function configureAuthoritativeTeamWorker(
     state.leader_cwd = cwd;
     state.workers = (state.workers ?? []).map((worker) => ({
       ...worker,
-      working_dir: cwd,
-      worktree_path: cwd,
+      working_dir: workerCwd,
+      worktree_path: workerCwd,
       team_state_root: stateRoot,
     }));
     await writeJson(filePath, state);
@@ -497,8 +499,8 @@ async function configureAuthoritativeTeamWorker(
     index: 1,
     role: "executor",
     pane_id: workerPaneId,
-    working_dir: cwd,
-    worktree_path: cwd,
+    working_dir: workerCwd,
+    worktree_path: workerCwd,
     team_state_root: stateRoot,
   });
   process.env.TMUX = "1";
@@ -841,6 +843,7 @@ describe("codex native hook config", () => {
 			"UserPromptSubmit",
 			"PreCompact",
 			"PostCompact",
+			"SubagentStop",
 			"Stop",
 		]);
 
@@ -5197,6 +5200,213 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
     }
   });
 
+  it("discovers leader plugins for authoritative Team worker events in an isolated worktree", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-team-worker-subagent-stop-"));
+    const workerCwd = realpathSync(await mkdtemp(join(tmpdir(), "omx-native-hook-team-worker-worktree-")));
+    const originalCodexHome = process.env.CODEX_HOME;
+    try {
+      await writeSessionStart(cwd, "leader-session", {
+        nativeSessionId: "leader-native",
+        pid: process.pid,
+      });
+      await configureAuthoritativeTeamWorker(cwd, "team-worker-subagent-stop", "%10", workerCwd);
+      const stateDir = join(cwd, ".omx", "state");
+      const leaderPointerPath = join(stateDir, "session.json");
+      const leaderPointerBefore = await readFile(leaderPointerPath, "utf-8");
+      const codexHome = join(cwd, "codex-home");
+      process.env.CODEX_HOME = codexHome;
+      await mkdir(codexHome, { recursive: true });
+      await writeJson(join(codexHome, ".omx-config.json"), {
+        notifications: { enabled: true, includeChildAgents: true },
+      });
+      const eventsPath = join(cwd, "child-events.jsonl");
+      await mkdir(join(cwd, ".omx", "hooks"), { recursive: true });
+      await writeFile(join(cwd, ".omx", "hooks", "capture.mjs"), `import { appendFileSync } from 'node:fs';
+export function onHookEvent(event) {
+  appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify({ event, pluginCwd: process.cwd(), teamStateRoot: process.env.OMX_TEAM_STATE_ROOT }) + '\\n');
+}
+`);
+
+      const parentSessionId = "team-worker-native-session";
+      const childThreadId = "team-worker-native-child";
+      const turnId = "team-worker-child-turn";
+      await dispatchCodexNativeHook({
+        hook_event_name: "SubagentStop",
+        cwd: workerCwd,
+        session_id: parentSessionId,
+        agent_id: childThreadId,
+        agent_type: "executor",
+        turn_id: turnId,
+      }, { cwd: workerCwd });
+
+      const tracking = await readSubagentTrackingState(workerCwd);
+      const child = tracking.sessions[parentSessionId]?.threads[childThreadId];
+      assert.equal(child?.completion_source, "native_stop_event");
+      assert.equal(child?.last_completed_turn_id, turnId);
+      assert.equal(child?.status, "closed");
+      const events = (await readFile(eventsPath, "utf-8")).trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(events.map(({ event, pluginCwd, teamStateRoot }) => ({
+        event: [event.event, event.session_id, event.thread_id, event.turn_id],
+        pluginCwd,
+        teamStateRoot,
+      })), [
+        {
+          event: ["subagent-stop", parentSessionId, childThreadId, turnId],
+          pluginCwd: workerCwd,
+          teamStateRoot: stateDir,
+        },
+      ]);
+      await dispatchCodexNativeHook({
+        hook_event_name: "SessionStart",
+        cwd: workerCwd,
+        session_id: parentSessionId,
+      }, { cwd: workerCwd, sessionOwnerPid: process.pid });
+      const workerEvents = (await readFile(eventsPath, "utf-8")).trim().split("\n").map((line) => JSON.parse(line)).slice(1);
+      assert.deepEqual(workerEvents.map(({ event, pluginCwd, teamStateRoot }) => ({
+        event: event.event,
+        pluginCwd,
+        teamStateRoot,
+      })), [{
+        event: "session-start",
+        pluginCwd: workerCwd,
+        teamStateRoot: stateDir,
+      }]);
+      assert.equal(await readFile(leaderPointerPath, "utf-8"), leaderPointerBefore);
+    } finally {
+      if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = originalCodexHome;
+      await rm(workerCwd, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("tracks native child SessionStart events under verified Team worker parents", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-team-worker-child-start-"));
+    const workerCwd = realpathSync(await mkdtemp(join(tmpdir(), "omx-native-hook-team-worker-child-worktree-")));
+    const originalCodexHome = process.env.CODEX_HOME;
+    try {
+      await writeSessionStart(cwd, "leader-session", {
+        nativeSessionId: "leader-native",
+        pid: process.pid,
+      });
+      await configureAuthoritativeTeamWorker(cwd, "team-worker-child-start", "%10", workerCwd);
+      const stateDir = join(cwd, ".omx", "state");
+      const pointerPath = join(stateDir, "session.json");
+      const pointerBefore = await readFile(pointerPath, "utf-8");
+      const codexHome = join(cwd, "codex-home");
+      process.env.CODEX_HOME = codexHome;
+      await writeJson(join(codexHome, ".omx-config.json"), {
+        notifications: { enabled: true, includeChildAgents: true },
+      });
+      const eventsPath = join(cwd, "team-worker-child-events.jsonl");
+      await mkdir(join(cwd, ".omx", "hooks"), { recursive: true });
+      await writeFile(join(cwd, ".omx", "hooks", "capture.mjs"), `import { appendFileSync } from 'node:fs';
+export function onHookEvent(event) {
+  appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify({ event: event.event, session_id: event.session_id, omx_session_id: event.omx_session_id }) + '\\n');
+}
+`);
+
+      const workerSessionId = "team-worker-native-session";
+      const childSessionId = "team-worker-child-session";
+      const grandchildSessionId = "team-worker-grandchild-session";
+      for (const [sessionId, parentThreadId] of [
+        [childSessionId, workerSessionId],
+        [grandchildSessionId, childSessionId],
+      ]) {
+        const transcriptPath = join(workerCwd, `${sessionId}.jsonl`);
+        await writeFile(transcriptPath, `${JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            source: { subagent: { thread_spawn: { parent_thread_id: parentThreadId } } },
+          },
+        })}\n`);
+        await dispatchCodexNativeHook({
+          hook_event_name: "SessionStart",
+          cwd: workerCwd,
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        }, { cwd: workerCwd, sessionOwnerPid: process.pid });
+      }
+
+      assert.equal(existsSync(eventsPath), false, "Team worker child starts must not dispatch in the leader session scope");
+      const trackingAfterStarts = await readSubagentTrackingState(workerCwd);
+      assert.equal(trackingAfterStarts.sessions[workerSessionId]?.threads[childSessionId]?.kind, "subagent");
+      assert.equal(trackingAfterStarts.sessions[childSessionId]?.threads[grandchildSessionId]?.kind, "subagent");
+
+      const leafSessionId = "team-worker-leaf-session";
+      const turnId = "team-worker-leaf-turn";
+      await dispatchCodexNativeHook({
+        hook_event_name: "SubagentStop",
+        cwd: workerCwd,
+        session_id: grandchildSessionId,
+        agent_id: leafSessionId,
+        turn_id: turnId,
+      }, { cwd: workerCwd });
+      const trackingAfterStop = await readSubagentTrackingState(workerCwd);
+      const leaf = trackingAfterStop.sessions[grandchildSessionId]?.threads[leafSessionId];
+      assert.equal(leaf?.completion_source, "native_stop_event");
+      assert.equal(leaf?.last_completed_turn_id, turnId);
+      assert.equal(leaf?.status, "closed");
+      assert.equal(await readFile(pointerPath, "utf-8"), pointerBefore);
+    } finally {
+      if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = originalCodexHome;
+      await rm(workerCwd, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps native SubagentStop best-effort when opted-in hook dispatch fails", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-subagent-dispatch-failure-"));
+    const originalCodexHome = process.env.CODEX_HOME;
+    try {
+      const codexHome = join(cwd, "codex-home");
+      process.env.CODEX_HOME = codexHome;
+      await writeJson(join(codexHome, ".omx-config.json"), {
+        notifications: { enabled: true, includeChildAgents: true },
+      });
+      const parentSessionId = "dispatch-failure-parent";
+      const childSessionId = "dispatch-failure-child";
+      await writeSessionStart(cwd, "dispatch-failure-session", {
+        nativeSessionId: parentSessionId,
+        pid: process.pid,
+      });
+      const eventsPath = join(cwd, "subagent-events.jsonl");
+      await mkdir(join(cwd, ".omx", "hooks"), { recursive: true });
+      await writeFile(join(cwd, ".omx", "hooks", "capture.mjs"), `import { appendFileSync } from 'node:fs';
+export function onHookEvent(event) {
+  appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify({ event: event.event, thread_id: event.thread_id }) + '\\n');
+}
+`);
+      const logsPath = join(cwd, ".omx", "logs");
+      await rm(logsPath, { recursive: true, force: true });
+      await writeFile(logsPath, "not a directory");
+      const payload = {
+        hook_event_name: "SubagentStop",
+        cwd,
+        session_id: parentSessionId,
+        agent_id: childSessionId,
+        turn_id: "dispatch-failure-turn",
+      };
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = runNativeHookCliResult(payload, { cwd, env: process.env });
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.deepEqual(parseSingleJsonStdout(result.stdout), {});
+      }
+
+      const events = (await readFile(eventsPath, "utf-8")).trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(events, [{ event: "subagent-stop", thread_id: childSessionId }]);
+      const tracking = await readSubagentTrackingState(cwd);
+      assert.equal(tracking.sessions["dispatch-failure-session"]?.threads[childSessionId]?.completion_source, "native_stop_event");
+    } finally {
+      if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = originalCodexHome;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("rejects leader aliases from foreign-cwd pointer evidence in a worker worktree", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-team-worker-foreign-alias-"));
     try {
@@ -6339,6 +6549,64 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
     }
   });
 
+  for (const scenario of ["startup", "direct-codex", "resume", "unknown-source", "missing-file", "foreign-session", "omitted-sections", "changed-memory", "shortened-memory"] as const) {
+    it(`preserves startup memory delivery for ${scenario}`, async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "omx-startup-context-"));
+      const previous = process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE;
+      const sessionId = "sess-startup-context";
+      const stack = "UNIQUE_STACK_MARKER TypeScript";
+      const priority = "UNIQUE_PRIORITY_MARKER Save a checkpoint. Keep review evidence.";
+      try {
+        await writeJson(join(cwd, ".omx", "project-memory.json"), {
+          techStack: stack,
+          build: "UNIQUE_BUILD_MARKER npm test",
+          conventions: "UNIQUE_CONVENTIONS_MARKER small diffs",
+          directives: [{ directive: "UNIQUE_DIRECTIVE_MARKER preserve evidence", priority: "high" }],
+          notes: [{ content: "HOOK_ONLY_MEMORY_NOTE" }],
+        });
+        await writeFile(join(cwd, ".omx", "notepad.md"), `## PRIORITY\n${priority.replace(" Keep", "\nKeep")}\n`);
+        const overlay = scenario === "omitted-sections" ? "Runtime instructions without memory." : await generateOverlay(cwd, sessionId);
+        const instructionsPath = await writeSessionModelInstructionsFile(cwd, sessionId, overlay);
+        process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE = scenario === "foreign-session"
+          ? await writeSessionModelInstructionsFile(cwd, "another-session", overlay)
+          : instructionsPath;
+        if (scenario === "direct-codex") delete process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE;
+        if (scenario === "missing-file") await rm(instructionsPath);
+        if (scenario === "changed-memory") {
+          await writeJson(join(cwd, ".omx", "project-memory.json"), { techStack: "UPDATED_STACK_MARKER" });
+          await writeFile(join(cwd, ".omx", "notepad.md"), "## PRIORITY\nUPDATED_PRIORITY_MARKER\n");
+        }
+        if (scenario === "shortened-memory") {
+          await writeJson(join(cwd, ".omx", "project-memory.json"), { techStack: "UNIQUE_STACK_MARKER" });
+          await writeFile(join(cwd, ".omx", "notepad.md"), "## PRIORITY\nUNIQUE_PRIORITY_MARKER\n");
+        }
+        const result = await dispatchCodexNativeHook({
+          hook_event_name: "SessionStart", cwd, session_id: sessionId,
+          ...(scenario === "unknown-source" ? {} : { source: scenario === "resume" ? "resume" : "startup" }),
+        }, { cwd, sessionOwnerPid: process.pid });
+        const context = JSON.stringify(result.outputJson);
+        if (scenario === "changed-memory") {
+          assert.match(context, /UPDATED_STACK_MARKER/);
+          assert.match(context, /UPDATED_PRIORITY_MARKER/);
+        } else if (scenario === "shortened-memory") {
+          assert.match(context, /UNIQUE_STACK_MARKER/);
+          assert.match(context, /UNIQUE_PRIORITY_MARKER/);
+        } else {
+          assert.equal(context.includes(stack), scenario !== "startup");
+          assert.equal(context.includes(priority), scenario !== "startup");
+          assert.equal(context.includes("UNIQUE_BUILD_MARKER"), scenario !== "startup");
+          assert.equal(context.includes("UNIQUE_CONVENTIONS_MARKER"), scenario !== "startup");
+          assert.equal(context.includes("UNIQUE_DIRECTIVE_MARKER"), scenario !== "startup");
+          assert.match(context, /HOOK_ONLY_MEMORY_NOTE/);
+        }
+      } finally {
+        if (previous === undefined) delete process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE;
+        else process.env.OMX_STARTUP_MODEL_INSTRUCTIONS_FILE = previous;
+        await rm(cwd, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("includes persisted project-memory summary in SessionStart context", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-session-memory-"));
     try {
@@ -6809,6 +7077,26 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
     });
 
     assert.equal(resolved, 1100);
+  });
+
+  it("does not pin an ephemeral hook owner when no Codex ancestor is present", () => {
+    const commands = new Map<number, string>([
+      [2100, "node /repo/plugins/oh-my-codex/hooks/codex-native-hook.mjs"],
+      [1100, "sh -c node codex-native-hook"],
+      [900, "bash"],
+    ]);
+    const parents = new Map<number, number | null>([
+      [2100, 1100],
+      [1100, 900],
+      [900, 1],
+    ]);
+    const resolved = resolveSessionOwnerPidFromAncestry(2100, {
+      requireCodexAncestor: true,
+      readParentPid: (pid) => parents.get(pid) ?? null,
+      readProcessCommand: (pid) => commands.get(pid) ?? "",
+    });
+
+    assert.equal(resolved, null);
   });
 
   it("resolves the Codex owner from Windows process lineage without Unix ps", () => {

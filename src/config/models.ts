@@ -67,6 +67,8 @@ interface CodexConfigFile {
   model?: unknown;
   model_provider?: unknown;
   model_providers?: Record<string, unknown>;
+  profile?: unknown;
+  profiles?: Record<string, Record<string, unknown>>;
 }
 
 export const OMX_DEFAULT_FRONTIER_MODEL_ENV = 'OMX_DEFAULT_FRONTIER_MODEL';
@@ -113,6 +115,15 @@ function readModelsBlock(codexHomeOverride?: string): ModelsConfig | null {
 export const DEFAULT_FRONTIER_MODEL = 'gpt-6-astra';
 export const DEFAULT_STANDARD_MODEL = 'gpt-6-astra';
 export const DEFAULT_SPARK_MODEL = 'gpt-6-astra';
+
+/**
+ * Built-in provider IDs that come with Codex.
+ * Custom/third-party providers are everything else.
+ */
+export const BUILTIN_PROVIDER_IDS = new Set([
+  'openai',        // Default OpenAI provider (when no model_provider is specified)
+  'openai-chatgpt', // OpenAI subscription provider (set by `omx auth add`)
+]) as ReadonlySet<string>;
 export const GPT_5_6_MODEL_ALIASES = ['gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-sol'] as const;
 export const KNOWN_CODEX_MODEL_ALIASES = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna', ...GPT_5_6_MODEL_ALIASES] as const;
 export type KnownCodexModelAlias = (typeof KNOWN_CODEX_MODEL_ALIASES)[number];
@@ -286,8 +297,105 @@ function getCodexConfigRootModel(codexHomeOverride?: string): string | undefined
   return normalizeConfiguredValue(readCodexConfigFile(codexHomeOverride)?.model);
 }
 
+/**
+ * Check if a model is explicitly configured at the root level.
+ * This is used to determine if we should suppress astra guidance for custom providers.
+ */
+export function isModelConfiguredAtRoot(codexHomeOverride?: string): boolean {
+  return !!getCodexConfigRootModel(codexHomeOverride);
+}
+
+/**
+ * Resolve the effective configured model, considering profile-specific overrides.
+ * If a profile is active, profile-specific model takes precedence.
+ * Falls back to root-level model if no profile is set or profile has no override.
+ * Returns undefined if no model is configured at either level.
+ */
+export function getCodexConfigEffectiveModel(codexHomeOverride?: string): string | undefined {
+  const config = readCodexConfigFile(codexHomeOverride);
+  if (!config) return undefined;
+
+  const activeProfile = normalizeConfiguredValue(config.profile);
+  if (activeProfile) {
+    const profiles = config.profiles;
+    if (profiles && typeof profiles === 'object' && !Array.isArray(profiles)) {
+      const profileConfig = profiles[activeProfile];
+      if (profileConfig && typeof profileConfig === 'object' && !Array.isArray(profileConfig)) {
+        const profileModel = normalizeConfiguredValue(profileConfig.model);
+        if (profileModel) {
+          return profileModel;
+        }
+      }
+    }
+  }
+
+  return normalizeConfiguredValue(config.model);
+}
+
+/**
+ * Check if a model is configured either at root or in an active profile.
+ * Used to determine if exactModel pins should be baked for built-in providers.
+ */
+export function isModelConfigured(codexHomeOverride?: string): boolean {
+  return !!getCodexConfigEffectiveModel(codexHomeOverride);
+}
+
+/**
+ * Check if a model is configured by an active profile (not at root).
+ * Used to determine if profile models should apply before class-based fallbacks.
+ */
+export function isProfileScopedModel(codexHomeOverride?: string): boolean {
+  const config = readCodexConfigFile(codexHomeOverride);
+  if (!config) return false;
+  
+  const activeProfile = normalizeConfiguredValue(config.profile);
+  if (!activeProfile) return false;
+  
+  const profiles = config.profiles;
+  if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return false;
+  
+  const profileConfig = profiles[activeProfile];
+  if (!profileConfig || typeof profileConfig !== 'object' || Array.isArray(profileConfig)) return false;
+  
+  return !!normalizeConfiguredValue(profileConfig.model);
+}
+
 export function getCodexConfigRootModelProvider(codexHomeOverride?: string): string | undefined {
   return normalizeConfiguredValue(readCodexConfigFile(codexHomeOverride)?.model_provider);
+}
+
+/**
+ * Resolve the effective model provider, considering profile-specific overrides.
+ * If a profile is active, profile-specific model_provider takes precedence.
+ * Falls back to root-level model_provider if no profile is set or profile has no override.
+ */
+export function getCodexConfigEffectiveModelProvider(codexHomeOverride?: string): string | undefined {
+  const config = readCodexConfigFile(codexHomeOverride);
+  if (!config) return undefined;
+
+  const activeProfile = normalizeConfiguredValue(config.profile);
+  if (activeProfile) {
+    const profiles = config.profiles;
+    if (profiles && typeof profiles === 'object' && !Array.isArray(profiles)) {
+      const profileConfig = profiles[activeProfile];
+      if (profileConfig && typeof profileConfig === 'object' && !Array.isArray(profileConfig)) {
+        const profileProvider = normalizeConfiguredValue(profileConfig.model_provider);
+        if (profileProvider) {
+          return profileProvider;
+        }
+      }
+    }
+  }
+
+  return normalizeConfiguredValue(config.model_provider);
+}
+
+/**
+ * Check if a provider ID is a built-in provider.
+ */
+export function isBuiltinProvider(providerId: string | undefined): boolean {
+  if (!providerId) return true; // Empty/undefined means default OpenAI
+  return BUILTIN_PROVIDER_IDS.has(providerId);
 }
 
 export function getEnvConfiguredStandardDefaultModel(

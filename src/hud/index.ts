@@ -10,12 +10,17 @@
  *   omx hud --reconcile-tmux
  */
 
-import { execFileSync, spawn } from 'child_process';
+import { execFileSync } from 'child_process';
 import { readlinkSync, realpathSync } from 'node:fs';
 import { readAllState, readHudConfig, readHudLayoutProjection } from './state.js';
 import { getHudRenderMaxLines, renderHud } from './render.js';
 import type { HudFlags, HudPreset, HudRenderContext, ResolvedHudConfig } from './types.js';
-import { HUD_TMUX_HEIGHT_LINES, HUD_TMUX_ULTRAGOAL_HEIGHT_LINES } from './constants.js';
+import {
+  HUD_TMUX_HEIGHT_LINES,
+  HUD_TMUX_ULTRAGOAL_HEIGHT_LINES,
+  HUD_WATCH_REPAIR_TIMEOUT_MS,
+} from './constants.js';
+import { spawnReconcileWithTimeout } from './spawn-reconcile-with-timeout.js';
 import { sleep } from '../utils/sleep.js';
 import { runHudAuthorityTick } from './authority.js';
 import { isHudWatchSessionAttached } from './session-attached.js';
@@ -49,8 +54,19 @@ export const HUD_USAGE = [
   '  omx hud --json       Output raw state as JSON',
   '  omx hud --preset=X   Use preset: minimal, focused, full',
   '  omx hud --tmux       Open HUD in a tmux split pane (auto-detects orientation)',
-  '  omx hud --reconcile-tmux',
+  '  omx hud --reconcile-tmux [--reconcile-timeout-ms=N]',
 ].join('\n');
+
+function parseReconcileTimeoutMs(args: string[]): number | null | undefined {
+  const timeoutArgs = args.filter((arg) => arg.startsWith('--reconcile-timeout-ms='));
+  if (timeoutArgs.length === 0) return undefined;
+  if (timeoutArgs.length !== 1) return null;
+
+  const rawTimeout = timeoutArgs[0]!.slice('--reconcile-timeout-ms='.length);
+  if (!/^[1-9]\d*$/.test(rawTimeout)) return null;
+  const timeoutMs = Number(rawTimeout);
+  return Number.isSafeInteger(timeoutMs) && timeoutMs <= 2_147_483_647 ? timeoutMs : null;
+}
 
 type SleepFn = (ms: number, signal?: AbortSignal) => Promise<void>;
 
@@ -98,6 +114,7 @@ interface RunWatchModeDependencies {
   readHudHookHealthFn: (input: ReadHudHookHealthInput) => HudHookHealth;
   readHudLeaderOwnerFn: (leaderPaneId: string, ownerId: string) => 'current' | 'mismatch' | 'unknown';
   reconcileTmuxHudFn: (cwd: string, leaderPanePid?: string) => Promise<void | boolean>;
+  repairTimeoutMs: number;
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
   registerSigint: (handler: () => void) => void | (() => void);
@@ -228,6 +245,7 @@ export async function runWatchMode(
     readHudLayoutProjectionFn: deps.readHudLayoutProjectionFn ?? readHudLayoutProjection,
     readHudHookHealthFn: deps.readHudHookHealthFn ?? readHudHookHealth,
     readHudLeaderOwnerFn: deps.readHudLeaderOwnerFn ?? readHudLeaderOwnerIdentity,
+    repairTimeoutMs: deps.repairTimeoutMs ?? HUD_WATCH_REPAIR_TIMEOUT_MS,
     reconcileTmuxHudFn: deps.reconcileTmuxHudFn ?? (async (reconcileCwd, leaderPanePid) => {
       const leaderPaneId = dependencies.env[OMX_TMUX_HUD_LEADER_PANE_ENV]?.trim();
       if (!leaderPaneId?.startsWith('%') || !leaderPanePid) return false;
@@ -239,23 +257,17 @@ export async function runWatchMode(
         },
       });
       if (!omxEntry) return false;
-      // A tmux run-shell job reports nonzero exits in the user's active pane
-      // even with redirected stderr. Run independently of the pane's shell;
-      // reconciliation may replace this watcher, and retries are best-effort.
-      const child = spawn(process.execPath, [omxEntry, 'hud', '--reconcile-tmux'], {
+      // Spawn the reconcile process with timeout and process tree kill handling.
+      // The helper uses an unreferenced timer to avoid keeping the watcher alive,
+      // and kills the process group on POSIX / process tree on Windows.
+      return spawnReconcileWithTimeout({
+        omxBinary: omxEntry,
         cwd: reconcileCwd,
-        env: { ...dependencies.env, TMUX_PANE: leaderPaneId,
-          OMX_HUD_WATCH_REPAIR: '1', OMX_HUD_WATCH_LEADER_PID: leaderPanePid },
-        stdio: 'ignore',
-        detached: true,
-        windowsHide: true,
+        env: dependencies.env,
+        timeoutMs: dependencies.repairTimeoutMs,
+        leaderPaneId,
+        leaderPanePid,
       });
-      const settled = new Promise<boolean>((resolve) => {
-        child.once('error', () => resolve(false));
-        child.once('close', (code) => resolve(code === 0));
-      });
-      child.unref();
-      return settled;
     }),
     writeStdout: deps.writeStdout ?? ((text: string) => process.stdout.write(text)),
     writeStderr: deps.writeStderr ?? ((text: string) => process.stderr.write(text)),
@@ -589,7 +601,10 @@ export async function hudCommand(
   args: string[],
   deps: {
     cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    omxEntryPath?: string;
     reconcileHudForPromptSubmit?: typeof reconcileHudForPromptSubmit;
+    spawnReconcileWithTimeoutFn?: typeof spawnReconcileWithTimeout;
   } = {},
 ): Promise<void> {
   if (args[0] === '--help' || args[0] === '-h') {
@@ -601,6 +616,33 @@ export async function hudCommand(
   const cwd = deps.cwd ?? process.cwd();
 
   if (args.includes('--reconcile-tmux')) {
+    const timeoutMs = parseReconcileTimeoutMs(args);
+    if (timeoutMs !== undefined) {
+      if (timeoutMs === null) {
+        process.exitCode = 1;
+        return;
+      }
+
+      const env = deps.env ?? process.env;
+      const omxEntryPath = deps.omxEntryPath ?? resolveOmxCliEntryPath({ cwd, env });
+      if (!omxEntryPath) {
+        process.exitCode = 1;
+        return;
+      }
+
+      const completed = await (deps.spawnReconcileWithTimeoutFn ?? spawnReconcileWithTimeout)({
+        omxBinary: omxEntryPath,
+        cwd,
+        env,
+        timeoutMs,
+        leaderPaneId: env.TMUX_PANE,
+        leaderPanePid: env.OMX_HUD_WATCH_LEADER_PID,
+        keepAlive: true,
+      });
+      if (!completed) process.exitCode = 1;
+      return;
+    }
+
     const result = await (deps.reconcileHudForPromptSubmit ?? reconcileHudForPromptSubmit)(cwd);
     if (result.status === 'failed') {
       process.exitCode = 1;

@@ -8,8 +8,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, openSync, closeSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveCanonicalTeamStateRoot } from '../team/state-root.js';
@@ -84,9 +85,9 @@ export type RuntimeCommand =
   | { command: 'RemoveDispatchRecords'; request_ids: string[] }
   | { command: 'RequestReplay'; cursor?: string }
   | { command: 'CaptureSnapshot' }
-  | { command: 'CreateMailboxMessage'; message_id: string; from_worker: string; to_worker: string; body: string }
-  | { command: 'MarkMailboxNotified'; message_id: string }
-  | { command: 'MarkMailboxDelivered'; message_id: string };
+  | { command: 'CreateMailboxMessage'; team_name?: string; message_id: string; from_worker: string; to_worker: string; body: string }
+  | { command: 'MarkMailboxNotified'; team_name?: string; message_id: string }
+  | { command: 'MarkMailboxDelivered'; team_name?: string; message_id: string };
 
 // Rust RuntimeEvent variants (serde tag="event")
 export type RuntimeEvent =
@@ -98,10 +99,10 @@ export type RuntimeEvent =
   | { event: 'DispatchFailed'; request_id: string; reason: string }
   | { event: 'DispatchRecordsRemoved'; request_ids: string[] }
   | { event: 'ReplayRequested'; cursor?: string }
-  | { event: 'SnapshotCaptured' }
-  | { event: 'MailboxMessageCreated'; message_id: string; from_worker: string; to_worker: string; body?: string }
-  | { event: 'MailboxNotified'; message_id: string }
-  | { event: 'MailboxDelivered'; message_id: string };
+  | { event: 'SnapshotCaptured'; dispatch_records?: DispatchRecord[] }
+  | { event: 'MailboxMessageCreated'; team_name?: string | null; message_id: string; from_worker: string; to_worker: string; body?: string }
+  | { event: 'MailboxNotified'; team_name?: string | null; message_id: string }
+  | { event: 'MailboxDelivered'; team_name?: string | null; message_id: string };
 
 export interface DispatchRecord {
   request_id: string;
@@ -116,6 +117,7 @@ export interface DispatchRecord {
 }
 
 export interface MailboxRecord {
+  team_name?: string | null;
   message_id: string;
   from_worker: string;
   to_worker: string;
@@ -130,7 +132,7 @@ export interface MailboxRecord {
 // ---------------------------------------------------------------------------
 
 /**
- * Raised when the omx-runtime binary returns output that fails JSON decoding.
+ * Raised when the runtime protocol or compatibility output is invalid.
  *
  * Distinguishing parse failure from spawn failure (which `run()` already wraps
  * in a generic `Error`) lets callers — e.g. dispatch loops in
@@ -150,8 +152,6 @@ export class RuntimeBridgeError extends Error {
     this.context = context;
   }
 }
-
-let schemaValidated = false;
 
 export interface RuntimeBinaryDiscoveryOptions {
   debugPath?: string;
@@ -258,12 +258,21 @@ export class RuntimeBridge {
 
   /** Execute a RuntimeCommand and return the resulting RuntimeEvent. */
   execCommand(cmd: RuntimeCommand, options?: { compact?: boolean }): RuntimeEvent {
-    this.validateSchemaOnce();
-    const json = JSON.stringify(cmd);
-    const args = ['exec', json];
+    this.assertCompatible();
+    // The executing process checks its own capability before touching state.
+    const args = ['exec-scoped', JSON.stringify(cmd)];
     if (this.stateDir) args.push(`--state-dir=${this.stateDir}`);
     if (options?.compact) args.push('--compact');
-    const stdout = this.run(args);
+    let stdout: string;
+    try {
+      stdout = this.run(args, cmd.command === 'CaptureSnapshot');
+    } catch (cause) {
+      if (cause instanceof Error && (cause.message.includes('unknown subcommand `exec-scoped`')
+        || cause.message.includes('omx-runtime requires team-mailbox-scope-v1'))) {
+        throw new RuntimeBridgeError('omx-runtime requires exec-scoped with team-mailbox-scope-v1; rebuild or upgrade the runtime', { command: 'schema', cause });
+      }
+      throw cause;
+    }
     // Non-JSON stdout means the runtime contract was violated (truncated pipe,
     // schema drift, panic before flush). Surface a typed error so dispatch
     // callers can mark the command failed instead of bubbling SyntaxError up
@@ -309,6 +318,7 @@ export class RuntimeBridge {
 
   /** Initialize a fresh state directory. */
   initStateDir(dir: string): void {
+    this.assertCompatible();
     this.run(['init', dir]);
     this.stateDir = dir;
   }
@@ -387,49 +397,63 @@ export class RuntimeBridge {
   }
 
   // -------------------------------------------------------------------------
-  // Private helpers
+  // Runtime validation and process execution
   // -------------------------------------------------------------------------
 
-  private validateSchemaOnce(): void {
-    if (schemaValidated) return;
+  /** Validate the runtime before callers perform non-runtime side effects. */
+  assertCompatible(): void {
+    let stdout: string;
     try {
-      const stdout = this.run(['schema', '--json']);
-      const schema = JSON.parse(stdout);
-      const expectedCommands = [
-        'acquire-authority', 'renew-authority', 'queue-dispatch',
-        'mark-notified', 'mark-delivered', 'mark-failed', 'remove-dispatch-records',
-        'request-replay', 'capture-snapshot',
-      ];
-      const missing = expectedCommands.filter(
-        (c) => !schema.commands?.includes(c),
-      );
-      if (missing.length > 0) {
-        throw new Error(
-          `omx-runtime schema missing commands: ${missing.join(', ')}. ` +
-          `Bridge types may be out of sync with the Rust binary.`,
-        );
-      }
-      schemaValidated = true;
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('schema missing')) throw err;
-      // Binary not available — schema validation skipped
-      schemaValidated = true;
+      stdout = this.run(['schema', '--json']);
+    } catch (cause) {
+      if (isRuntimeTransportError(cause)) throw cause;
+      throw new RuntimeBridgeError(cause instanceof Error ? cause.message : 'omx-runtime schema failed', { command: 'schema', cause });
+    }
+    let schema;
+    try {
+      schema = JSON.parse(stdout);
+    } catch (cause) {
+      throw new RuntimeBridgeError('omx-runtime schema returned non-JSON output', { command: 'schema', cause });
+    }
+    if (!Array.isArray(schema?.capabilities) || !schema.capabilities.includes('team-mailbox-scope-v1')) {
+      throw new RuntimeBridgeError('omx-runtime requires team-mailbox-scope-v1; rebuild or upgrade the runtime', { command: 'schema' });
+    }
+    const expectedCommands = [
+      'acquire-authority', 'renew-authority', 'queue-dispatch',
+      'mark-notified', 'mark-delivered', 'mark-failed', 'remove-dispatch-records',
+      'request-replay', 'capture-snapshot',
+    ];
+    const missing = expectedCommands.filter((command) => !Array.isArray(schema.commands) || !schema.commands.includes(command));
+    if (missing.length > 0) {
+      throw new RuntimeBridgeError(`omx-runtime schema missing commands: ${missing.join(', ')}`, { command: 'schema' });
     }
   }
 
-  private run(args: string[]): string {
+  private run(args: string[], spoolStdout = false): string {
+    // Full dispatch snapshots can exceed execFileSync's pipe buffer.
+    const outputDir = spoolStdout ? mkdtempSync(join(tmpdir(), 'omx-runtime-output-')) : undefined;
+    const outputPath = outputDir ? join(outputDir, 'stdout') : undefined;
+    let outputFd: number | undefined;
     try {
-      const result = execFileSync(this.binaryPath, args, {
-        encoding: 'utf-8',
-        timeout: 10_000,
-        maxBuffer: 1024 * 1024,
-      windowsHide: true,
-    });
-      return result;
-    } catch (err: unknown) {
-      const execErr = err as { stderr?: string; message?: string };
-      const stderr = execErr.stderr?.trim() ?? execErr.message ?? 'unknown error';
-      throw new Error(`omx-runtime ${args[0]} failed: ${stderr}`);
+      if (outputPath) outputFd = openSync(outputPath, 'wx', 0o600);
+      let result: string;
+      try {
+        result = execFileSync(this.binaryPath, args, {
+          encoding: 'utf-8',
+          timeout: 10_000,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true,
+          stdio: ['pipe', outputFd ?? 'pipe', 'pipe'],
+        });
+      } catch (err: unknown) {
+        const execErr = err as { stderr?: string; message?: string };
+        const stderr = execErr.stderr?.trim() ?? execErr.message ?? 'unknown error';
+        throw new Error(`omx-runtime ${args[0]} failed: ${stderr}`, { cause: err });
+      }
+      return outputPath ? readFileSync(outputPath, 'utf-8') : result;
+    } finally {
+      if (outputFd !== undefined) closeSync(outputFd);
+      if (outputDir) rmSync(outputDir, { recursive: true, force: true });
     }
   }
 }
@@ -448,6 +472,25 @@ export function getDefaultBridge(stateDir?: string): RuntimeBridge {
     _defaultBridge = new RuntimeBridge({ stateDir });
   }
   return _defaultBridge;
+}
+
+export function isRuntimeTransportError(error: unknown): boolean {
+  const cause = error instanceof Error
+    ? error.cause as (NodeJS.ErrnoException & { signal?: string | null; status?: number | null }) | undefined
+    : undefined;
+  return typeof cause?.code === 'string'
+    && cause.status == null
+    && cause.signal == null
+    && ['EACCES', 'ENOENT', 'ENOTDIR', 'ENOEXEC', 'EPERM'].includes(cause.code);
+}
+
+export function preflightRuntimeBridge(stateDir: string): void {
+  if (!isBridgeEnabled()) return;
+  try {
+    getDefaultBridge(stateDir).assertCompatible();
+  } catch (error) {
+    if (!isRuntimeTransportError(error)) throw error;
+  }
 }
 
 export function isBridgeEnabled(): boolean {

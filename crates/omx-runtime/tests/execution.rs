@@ -178,6 +178,10 @@ fn schema_json_subcommand_prints_valid_json() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(parsed["schema_version"], 1);
+    assert!(parsed["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("team-mailbox-scope-v1")));
     assert!(parsed["commands"].is_array());
     assert!(parsed["events"].is_array());
 }
@@ -240,6 +244,64 @@ fn exec_subcommand_processes_json_command() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(parsed["event"], "SnapshotCaptured");
+    assert_eq!(parsed["dispatch_records"], serde_json::json!([]));
+}
+
+#[test]
+fn capture_snapshot_returns_event_authoritative_dispatch_records() {
+    let dir = std::env::temp_dir().join(format!("omx-capture-records-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_arg = format!("--state-dir={}", dir.display());
+    let run = |command: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+            .args(["exec-scoped", command, &state_arg])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    run(
+        r#"{"command":"QueueDispatch","request_id":"queued","target":"worker-1","metadata":{"team_name":"alpha"}}"#,
+    );
+    let stale = std::fs::read(dir.join("dispatch.json")).unwrap();
+    run(r#"{"command":"MarkNotified","request_id":"queued","channel":"tmux"}"#);
+    std::fs::write(dir.join("dispatch.json"), stale).unwrap();
+    let response = run(r#"{"command":"CaptureSnapshot"}"#);
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("dispatch.json")).unwrap()).unwrap();
+    assert_eq!(response["dispatch_records"], expected["records"]);
+    assert_eq!(response["dispatch_records"][0]["status"], "notified");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn exec_scoped_checks_and_persists_team_scope_in_the_mutating_process() {
+    let dir = std::env::temp_dir().join("omx-runtime-test-exec-scoped");
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_arg = format!("--state-dir={}", dir.display());
+    let command = r#"{"command":"CreateMailboxMessage","team_name":"alpha","message_id":"scoped","from_worker":"leader-fixed","to_worker":"worker-1","body":"private"}"#;
+    let output = Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args(["exec-scoped", command, &state_arg, "--compact"])
+        .output()
+        .expect("ran omx-runtime");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let event: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(event["team_name"], "alpha");
+    let mailbox: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("mailbox.json")).unwrap()).unwrap();
+    assert_eq!(mailbox["records"][0]["team_name"], "alpha");
+    let events: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("events.json")).unwrap()).unwrap();
+    assert_eq!(events[0]["team_name"], "alpha");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -522,7 +584,7 @@ fn exec_compact_immediately_persists_only_nonterminal_dispatch_records() {
     )
     .expect("valid events JSON");
     let events = events.as_array().expect("events array");
-    assert!(events
+    assert!(!events
         .iter()
         .any(|event| event["event"] == "SnapshotCaptured"));
     assert!(events

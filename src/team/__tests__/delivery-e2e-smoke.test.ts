@@ -147,10 +147,10 @@ function writeJson(file, value) {
 }
 function nowIso() { return new Date().toISOString(); }
 if (argv[0] === 'schema') {
-  process.stdout.write(JSON.stringify({ schema_version: 1, commands: ['acquire-authority','renew-authority','queue-dispatch','mark-notified','mark-delivered','mark-failed','request-replay','capture-snapshot'], events: [], transport: 'tmux' }) + '\\n');
+  process.stdout.write(JSON.stringify({ schema_version: 1, capabilities: ['team-mailbox-scope-v1'], commands: ['acquire-authority','renew-authority','queue-dispatch','mark-notified','mark-delivered','mark-failed','remove-dispatch-records','request-replay','capture-snapshot'], events: [], transport: 'tmux' }) + '\\n');
   process.exit(0);
 }
-if (argv[0] !== 'exec') process.exit(1);
+if (argv[0] !== 'exec' && argv[0] !== 'exec-scoped') process.exit(1);
 const command = JSON.parse(argv[1] || '{}');
 const dir = stateDir();
 const dispatchPath = path.join(dir, 'dispatch.json');
@@ -191,12 +191,19 @@ switch (command.command) {
     process.exit(0);
   }
   case 'CreateMailboxMessage':
-    mailbox.records.push({ message_id: command.message_id, from_worker: command.from_worker, to_worker: command.to_worker, body: command.body, created_at: timestamp, notified_at: null, delivered_at: null });
+    mailbox.records.push({ team_name: command.team_name, message_id: command.message_id, from_worker: command.from_worker, to_worker: command.to_worker, body: command.body, created_at: timestamp, notified_at: null, delivered_at: null });
     writeJson(mailboxPath, mailbox);
     process.stdout.write(JSON.stringify({ event: 'MailboxMessageCreated', message_id: command.message_id, from_worker: command.from_worker, to_worker: command.to_worker }) + '\\n');
     process.exit(0);
   case 'MarkMailboxNotified': {
-    const record = mailbox.records.find((entry) => entry.message_id === command.message_id);
+    const candidates = mailbox.records.filter((entry) => entry.message_id === command.message_id);
+    const scoped = candidates.filter((entry) => command.team_name != null && entry.team_name === command.team_name);
+    const record = scoped.length === 1
+      ? scoped[0]
+      : scoped.length === 0 && candidates.length === 1 && candidates[0]?.team_name == null
+        ? candidates[0]
+        : null;
+    if (!record) process.exit(1);
     if (record) {
       record.notified_at = timestamp;
       writeJson(mailboxPath, mailbox);
@@ -205,7 +212,14 @@ switch (command.command) {
     process.exit(0);
   }
   case 'MarkMailboxDelivered': {
-    const record = mailbox.records.find((entry) => entry.message_id === command.message_id);
+    const candidates = mailbox.records.filter((entry) => entry.message_id === command.message_id);
+    const scoped = candidates.filter((entry) => command.team_name != null && entry.team_name === command.team_name);
+    const record = scoped.length === 1
+      ? scoped[0]
+      : scoped.length === 0 && candidates.length === 1 && candidates[0]?.team_name == null
+        ? candidates[0]
+        : null;
+    if (!record) process.exit(1);
     if (record) {
       record.delivered_at = timestamp;
       writeJson(mailboxPath, mailbox);

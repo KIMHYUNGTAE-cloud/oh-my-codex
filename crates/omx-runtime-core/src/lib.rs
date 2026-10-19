@@ -15,6 +15,7 @@ pub use mailbox::{MailboxError, MailboxLog, MailboxRecord};
 pub use replay::ReplayState;
 
 pub const RUNTIME_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_CAPABILITIES: &[&str] = &["team-mailbox-scope-v1"];
 pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "acquire-authority",
     "renew-authority",
@@ -226,15 +227,21 @@ pub enum RuntimeCommand {
     },
     CaptureSnapshot,
     CreateMailboxMessage {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
         from_worker: String,
         to_worker: String,
         body: String,
     },
     MarkMailboxNotified {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
     },
     MarkMailboxDelivered {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
     },
 }
@@ -276,6 +283,8 @@ pub enum RuntimeEvent {
     },
     SnapshotCaptured,
     MailboxMessageCreated {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
         from_worker: String,
         to_worker: String,
@@ -283,9 +292,13 @@ pub enum RuntimeEvent {
         body: Option<String>,
     },
     MailboxNotified {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
     },
     MailboxDelivered {
+        #[serde(default)]
+        team_name: Option<String>,
         message_id: String,
     },
 }
@@ -651,6 +664,7 @@ mod tests {
         assert_eq!(
             deserialized,
             RuntimeEvent::MailboxMessageCreated {
+                team_name: None,
                 message_id: "msg-1".into(),
                 from_worker: "worker-1".into(),
                 to_worker: "leader-fixed".into(),

@@ -2,6 +2,7 @@ import { spawn, execSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import type { EvalConfig, EvalFixture, RunRecord } from './types.js';
 import { scoreResponse } from './suite.js';
 
@@ -15,6 +16,8 @@ export interface CollectorOptions {
   apiKeyEnv?: string;
   /** Skip git clone (for testing). Default: false */
   skipGitClone?: boolean;
+  /** Clock used to measure elapsed latency. Default: performance.now */
+  clock?: () => number;
 }
 
 export interface CodexOutput {
@@ -26,6 +29,7 @@ export interface CodexOutput {
 export interface CollectionResult {
   record: RunRecord;
   error?: string;
+  responseDebug?: string;
 }
 
 /**
@@ -40,6 +44,7 @@ export async function collectRecord(
 ): Promise<CollectionResult> {
   const timeoutMs = options.timeoutMs ?? 15 * 60 * 1000; // 15 minutes default
   const invokeCodex = options.invokeCodex ?? defaultCodexInvoker;
+  const clock = options.clock ?? (() => performance.now());
   
   // Auto-detect if we need layofflabs provider for OMX-internal model names
   const roleConfig = config.roles[fixture.surface];
@@ -49,7 +54,7 @@ export async function collectRecord(
   const provider = options.provider ?? (isOmxInternalModel ? 'layofflabs' : undefined);
   const apiKeyEnv = options.apiKeyEnv ?? 'OPENAI_API_KEY';
 
-  const startTime = Date.now();
+  const startTime = clock();
   const tempDir = mkdtempSync(join(tmpdir(), 'codex-eval-'));
   let output: CodexOutput | null = null;
   const skipGitClone = options.skipGitClone ?? false;
@@ -126,16 +131,24 @@ export async function collectRecord(
     }
     args.push(fullPrompt);
 
-    // Run Codex CLI with timeout
-    output = await Promise.race([
-      invokeCodex(args, tempDir),
-      new Promise<CodexOutput>((_, reject) =>
-        setTimeout(() => reject(new Error(`Codex execution timeout after ${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]);
+    // Run Codex CLI with timeout and release the timer when invocation settles.
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    try {
+      output = await Promise.race([
+        invokeCodex(args, tempDir),
+        new Promise<CodexOutput>((_, reject) => {
+          timeoutTimer = setTimeout(
+            () => reject(new Error(`Codex execution timeout after ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+    }
 
     // Parse output and grade response
-    const latencyMs = Date.now() - startTime;
+    const latencyMs = clock() - startTime;
 
     if (output.exitCode !== 0) {
       // Codex failed; record error outcome
@@ -157,13 +170,29 @@ export async function collectRecord(
     }
 
     // Parse JSONL output (--json outputs one JSON object per line)
-    // The final event should contain the agent's final response
-    let finalEvent: Record<string, unknown> | null = null;
+    // Codex v0.162+ emits a stream of events:
+    // - item.completed events with type 'agent_message' contain the response in item.text
+    // - turn.completed events contain usage data
+    let responseText = '';
+    let usageData: Record<string, number> | undefined;
+
     try {
       const lines = output.stdout.trim().split('\n');
       for (const line of lines) {
-        if (line.trim()) {
-          finalEvent = JSON.parse(line);
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+
+        // Extract response from agent_message items
+        if (event.type === 'item.completed' && event.item && typeof event.item === 'object') {
+          const item = event.item as Record<string, unknown>;
+          if (item.type === 'agent_message' && item.text) {
+            responseText = String(item.text);
+          }
+        }
+
+        // Extract usage from turn.completed
+        if (event.type === 'turn.completed' && event.usage) {
+          usageData = event.usage as Record<string, number>;
         }
       }
     } catch (e) {
@@ -184,7 +213,7 @@ export async function collectRecord(
       };
     }
 
-    if (!finalEvent) {
+    if (!responseText) {
       return {
         record: {
           fixtureId: fixture.id,
@@ -197,15 +226,10 @@ export async function collectRecord(
           usage: null,
           operatorMinutes: null,
           difficult: false,
-          notes: 'No output from Codex exec',
+          notes: 'No agent response from Codex exec',
         },
       };
     }
-
-    // Extract response text and usage from final event
-    // The structure depends on what Codex outputs
-    const responseText = String(finalEvent.response ?? finalEvent.message ?? '');
-    const usageData = finalEvent.usage as Record<string, number> | undefined;
 
     // Grade response
     const checks = scoreResponse(fixture, responseText);
@@ -223,6 +247,9 @@ export async function collectRecord(
         }
       : null;
 
+    // Capture first 500 chars of response for debugging
+    const responseDebug = responseText.slice(0, 500);
+
     return {
       record: {
         fixtureId: fixture.id,
@@ -236,9 +263,10 @@ export async function collectRecord(
         operatorMinutes: null,
         difficult: false,
       },
+      responseDebug,
     };
   } catch (error) {
-    const latencyMs = Date.now() - startTime;
+    const latencyMs = clock() - startTime;
     return {
       record: {
         fixtureId: fixture.id,

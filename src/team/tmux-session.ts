@@ -2,7 +2,7 @@ import { spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { closeSync, chmodSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import {
@@ -2307,6 +2307,14 @@ function buildWorkerProcessLaunchSpecForMode(
     if (typeof value !== 'string' || value.trim() === '') continue;
     workerEnv[key] = value;
   }
+  delete workerEnv.OMX_CODEX_LAUNCH_ID;
+  if (workerCli === 'codex') {
+    const omxEntryPath = resolveOmxCliEntryPath({ cwd });
+    if (omxEntryPath) {
+      workerEnv.OMX_CODEX_LAUNCH_ID = randomUUID();
+      workerEnv.OMX_ENTRY_PATH = omxEntryPath;
+    }
+  }
 
   return {
     workerCli,
@@ -3588,6 +3596,10 @@ export function waitForWorkerReady(
     return paneLooksReady(scrollbackResult.stdout);
   };
 
+  // Reserve time for a final readiness poll to catch incompatibility markers
+  // that may appear after the first check() consumes most of the budget (finding #4309679342).
+  // Use a conservative estimate for check() runtime to ensure the final poll happens before deadline.
+  const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
     if (check()) return true;
@@ -3599,10 +3611,17 @@ export function waitForWorkerReady(
       promptDismissed = false;
     }
     const remaining = timeoutMs - (Date.now() - startedAt);
-    if (remaining <= 0) break;
-    sleepSeconds(Math.max(0, Math.min(delayMs, remaining)) / 1000);
+    // Reserve time for one final check; exit early if not enough time remains
+    if (remaining <= minCheckTimeMs) break;
+    // Sleep for min of backoff or remaining-minCheckTimeMs to leave time for final poll
+    sleepSeconds(Math.max(0, Math.min(delayMs, remaining - minCheckTimeMs)) / 1000);
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
+
+  // Final check before returning false, only if budget remains (finding #4310223535)
+  const finalRemaining = timeoutMs - (Date.now() - startedAt);
+  if (finalRemaining > 0 && check()) return true;
+  if (blockedByTrustPrompt) return false;
 
   return false;
 }
@@ -3620,7 +3639,10 @@ export async function waitForWorkerReadyDetailedAsync(
   hudPaneId?: string,
   incompatibility?: { workerCli?: TeamWorkerCli; finalArgs?: readonly string[]; onIncompatible: (reason: typeof CODEX_BYPASS_MDM_INCOMPATIBLE_REASON) => void },
 ): Promise<boolean> {
-  const initialBackoffMs = 150;
+  // Adaptive backoff: for very short timeouts (e.g., during tests), use a proportionally short backoff
+  // to allow multiple polling attempts. This ensures that incompatibility markers like MDM rejection
+  // can be detected even when the timeout is short.
+  const initialBackoffMs = Math.max(25, Math.min(150, timeoutMs / 2));
   const maxBackoffMs = 8000;
   const startedAt = Date.now();
   let blockedByTrustPrompt = false;
@@ -3684,6 +3706,10 @@ export async function waitForWorkerReadyDetailedAsync(
     return paneLooksReady(scrollbackResult.stdout);
   };
 
+  // Reserve time for a final readiness poll to catch incompatibility markers
+  // that may appear after the first check() consumes most of the budget (finding #4309679342).
+  // Use a conservative estimate for check() runtime to ensure the final poll happens before deadline.
+  const minCheckTimeMs = 50;
   let delayMs = initialBackoffMs;
   while (Date.now() - startedAt < timeoutMs) {
     if (await check()) return true;
@@ -3696,10 +3722,18 @@ export async function waitForWorkerReadyDetailedAsync(
       promptDismissed = false;
     }
     const remaining = timeoutMs - (Date.now() - startedAt);
-    if (remaining <= 0) break;
-    await sleep(Math.max(0, Math.min(delayMs, remaining)));
+    // Reserve time for one final check; exit early if not enough time remains
+    if (remaining <= minCheckTimeMs) break;
+    // Sleep for min of backoff or remaining-minCheckTimeMs to leave time for final poll
+    await sleep(Math.max(0, Math.min(delayMs, remaining - minCheckTimeMs)));
     delayMs = Math.min(maxBackoffMs, delayMs * 2);
   }
+
+  // Final check before returning false, only if budget remains (finding #4310223535)
+  const finalRemaining = timeoutMs - (Date.now() - startedAt);
+  if (finalRemaining > 0 && await check()) return true;
+  if (startupIncompatible) return false;
+  if (blockedByTrustPrompt) return false;
 
   return false;
 }

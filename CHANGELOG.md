@@ -4,6 +4,149 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.21.18] - 2026-10-17
+
+Patch release for the frozen range `v0.21.17..8edbeb8686a9f7288b45f03d8f553a72216832f1` (2 commits, 4 files, +358/−27; PR #3819).
+
+### Fixed
+
+- Bound managed hook-trust marker ranges and deduplicate repeated fences so foreign approved hook trust remains intact while tampered managed hashes remain fail-closed (#3819, reported in #3818 by @hetingyi; implemented by @Yeachan-Heo).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.18.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.17...v0.21.18
+
+## [0.21.17] - 2026-10-17
+
+## [0.21.16] - 2026-10-16
+
+Patch release for the frozen range `v0.21.15..00d06af4cac8663f409e66576f1719da28199ff0` (43 commits, 15 files, +6,158/−267; PRs #3792 and #3813).
+
+### Fixed
+
+- Pin live Codex sessions to the plugin-cache snapshots they use and preserve live-pinned snapshots during cache recovery; provide scoped repair for verified, managed, unpinned snapshots (#3792, fixing #3790; implemented by @Yeachan-Heo and reported by @spicysharkco).
+
+### Integration
+
+- Back-merge v0.21.15 from main into dev to preserve main ancestry (#3813, authored by @Yeachan-Heo).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.16.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.15...v0.21.16
+
+## [0.21.15] - 2026-10-16
+
+Patch release for the frozen range `v0.21.14..38bbaab4c818cadcfe2b69de22c52cf56e670ca0` (6 commits, 39 files, +2,199/−152; PRs #3798, #3806, #3807, #3808, #3809, and #3811).
+
+### Fixed
+
+- Record native `SubagentStop` completion events and route nested native subagent lifecycles through tracked parents, preventing completed children from being left without completion records (#3798, #3809; authored by @shenyankm and @Yeachan-Heo).
+- Bound startup Wiki context and suppress memory already present in session instructions, avoiding duplicate or oversized startup context (#3808, authored by @shenyankm).
+
+### Maintenance
+
+- Make collector latency assertions deterministic by injecting a clock and removing timing-sensitive sleeps (#3811, authored by @Yeachan-Heo).
+
+### Integration
+
+- Back-merge v0.21.14 into dev and restore the normal main-to-dev ancestry after the squash merge (#3806, #3807; authored by @Yeachan-Heo).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.15.md) and [release readiness](docs/qa/release-readiness-0.21.15.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.14...v0.21.15
+
+## [0.21.14] - 2026-10-15
+
+Patch release for the frozen range `v0.21.13..7fd6e95a839c0c0c14de67a7bc976c4d9134b923` (3 commits, 9 files, +1,480/−71; PRs #3793 and #3803).
+
+### Added
+
+- Add `omx session timeline <session-id>` to reconstruct tool execution, turn boundaries, and context compactions from active or archived transcripts, with tool diagnostics including observed durations, exit codes, failures, and incomplete calls (#3793, authored by @hiSandog).
+
+### Integration
+
+- Back-merge the v0.21.13 release into dev (#3803, authored by @Yeachan-Heo).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.14.md) and [release readiness](docs/qa/release-readiness-0.21.14.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.13...v0.21.14
+
+## [0.21.13] - 2026-10-15
+
+Patch release for the frozen range `v0.21.12..51fa7eed6877b91706629174a2deeff83d1ce08f` (6 commits, 10 files, +576/−52; PRs #3787, #3795, #3796).
+
+### Fixed
+
+- Bound HUD reconciliation processes spawned by hooks with a timeout, so hung children cannot block later reconciliation (#3787, fixes #3785; authored by @Yeachan-Heo).
+
+### Maintenance
+
+- Update `serde_json` from 1.0.151 to 1.0.154 (#3795, @dependabot).
+- Update `@types/node` from 26.6.4 to 26.6.5 (#3796, @dependabot).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.13.md) and [release readiness](docs/qa/release-readiness-0.21.13.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.12...v0.21.13
+
+## [0.21.12] - 2026-10-15
+
+Patch release for the frozen range `v0.21.11..6937884f4d09a485d5b4f16498517bcd05384e06` (6 commits, 15 files, +998/−19; PRs #3786, #3788, #3789, #3791, #3794, #3797).
+
+### Highlights
+
+- Require claim-bound completion evidence before implementation tasks marked `requires_code_change: true` can complete (#3797, authored by @shenyankm). Existing clients completing these tasks must provide a report and structured verification summary.
+- Keep HUD branch labels cached until HEAD, refs, or git config changes, and bound watcher repair children so a hung reconcile cannot block later repairs (#3791, #3786; authored by @spicysharkco).
+
+### Maintenance
+
+- Update `@modelcontextprotocol/sdk` from 1.32.0 to 1.32.1 (#3794, @dependabot).
+- Make the HUD watcher resize and real-tmux test fixtures hermetic (#3788, #3789; authored by @spicysharkco).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.12.md) and [release readiness](docs/qa/release-readiness-0.21.12.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.11...v0.21.12
+
+## [0.21.11] - 2026-10-13
+
+Patch release for `v0.21.10..7e0b5f2330b9d85c5fdb9709ec0104e099836f4c` (3 commits, 2 files, +68/−5, PR #3781, fixes #3779).
+
+### Fixed
+
+- Stop writing inherited `model_provider` defaults into native agent TOMLs. Provider changes in `config.toml` now take effect without `omx setup --force`, while explicit per-agent model overrides remain supported (#3781, fixes #3779; authored by @Yeachan-Heo, co-authored by @gaebal-gajae).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.11.md) and [release readiness](docs/qa/release-readiness-0.21.11.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.10...v0.21.11
+
+## [0.21.10] - 2026-10-12
+
+Patch release for `v0.21.9..72fee0236cf8a4b45e6dd9b3d826871f402b84ae` (16 commits, 15 files, +1067/−82, PRs #3765/#3768/#3771/#3772/#3774/#3775/#3777, linked issues #3655/#3766/#3776).
+
+### Highlights
+
+- TOML configuration merge robustness: multi-line arrays in the `[tui]` configuration section are now correctly preserved during config merge operations, preventing loss of array elements and enabling complex TUI customization without manual repair (#3777, fixes #3776).
+- Astra-defaults evaluation infrastructure: the astra-defaults RunRecord collector gains base URL support for flexible test fixture hosting and implements repository cloning with fixture context, enabling live cost and quality evaluation across model configurations. Collector is now hermetic with bounded Codex v0.162+ JSON-line parsing and includes CI integration (#3655, #3765, #3768, #3772).
+- npm registry-visibility diagnostics: registry-visibility checks now include extended timeout windows and improved diagnostics to surface transient publication issues earlier and support troubleshooting of npm registry visibility failures in CI pipelines (#3771).
+
+### Added
+
+- Astra-defaults collector base URL support and repository cloning with fixture context (#3765, #3772).
+- npm registry-visibility check extended timeout and improved diagnostics (#3771).
+
+### Fixed
+
+- Preserve multi-line arrays in TOML `[tui]` configuration sections during merge operations (#3777, fixes #3776).
+- Harden astra-defaults collector for hermetic operation with correct handling of Codex v0.162+ JSON-line output format (#3772, #3774).
+- astra-defaults eval test failures and add to CI (#3768, fixes #3766).
+
+### Maintenance
+
+- astra-defaults evaluation results recorded for live-suite baseline (#3775).
+
+Full inventory, contributors, compatibility notes, and verification: [release notes](docs/release-notes-0.21.10.md) and [release readiness](docs/qa/release-readiness-0.21.10.md).
+
+**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.9...v0.21.10
+
 ## [0.21.9] - 2026-10-12
 
 Patch release for `v0.21.8..e4653cd8e115f923014be72cf0f7fb6645384246` (10 commits, 24 files, +1693/−96, PRs #3751/#3753/#3754/#3755/#3757/#3760/#3761/#3762/#3763/#3764, linked issues #3655/#3729).

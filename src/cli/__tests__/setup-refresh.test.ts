@@ -14,6 +14,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setup } from "../setup.js";
 import TOML from "@iarna/toml";
+import {
+  buildManagedCodexHookTrustState,
+  buildManagedCodexHooksConfig,
+  planManagedCodexHooksRemoval,
+} from "../../config/codex-hooks.js";
+import { upsertManagedCodexHookTrustState } from "../../config/generator.js";
 
 const TEST_CODEX_PROBES = {
   installMode: "legacy",
@@ -1173,6 +1179,83 @@ describe("omx setup refresh summary and dry-run behavior", () => {
       } finally {
         await rm(wd, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("repairs repeated hook-trust banners without losing approved foreign trust (#3818)", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-hook-trust-markers-"));
+    try {
+      const codexDir = join(wd, ".codex");
+      const hooksPath = join(codexDir, "hooks.json");
+      const configPath = join(codexDir, "config.toml");
+      await mkdir(codexDir, { recursive: true });
+
+      const hooks = buildManagedCodexHooksConfig(wd, { codexHomeDir: codexDir });
+      hooks.hooks.PreToolUse[0]!.hooks.push({
+        type: "command",
+        command: "echo foreign",
+        timeout: 600,
+      });
+      const hooksContent = JSON.stringify(hooks, null, 2);
+      const removalPlan = planManagedCodexHooksRemoval(hooksContent, hooksPath, {
+        codexHomeDir: codexDir,
+      });
+      assert.equal(removalPlan.ok, true);
+      if (!removalPlan.ok) return;
+
+      const foreignKey = `${hooksPath}:pre_tool_use:0:1`;
+      const foreignHash = removalPlan.coordinateMoves.find(
+        (move) => move.oldKey === foreignKey,
+      )?.expectedTrustedHash;
+      assert.ok(foreignHash, "fixture must include Codex's expected foreign-hook hash");
+      const managedTrustState = buildManagedCodexHookTrustState(hooksPath, wd, {
+        codexHomeDir: codexDir,
+        hooksContent,
+      });
+      const startMarker = "# OMX-owned Codex hook trust state";
+      const endMarker = "# End OMX-owned Codex hook trust state";
+      const initialConfig = upsertManagedCodexHookTrustState(
+        'model = "gpt-5.6-sol"\n',
+        wd,
+        hooksPath,
+        { codexHomeDir: codexDir, managedTrustState },
+      );
+      const repeatedBanners = initialConfig.replace(
+        startMarker,
+        Array.from({ length: 8 }, () => startMarker).join("\n"),
+      );
+      const configWithForeignTrust = repeatedBanners.replace(
+        endMarker,
+        [
+          `[hooks.state.${JSON.stringify(foreignKey)}]`,
+          `trusted_hash = ${JSON.stringify(foreignHash)}`,
+          "",
+          endMarker,
+        ].join("\n"),
+      );
+      await writeFile(hooksPath, hooksContent);
+      await writeFile(configPath, configWithForeignTrust);
+
+      await runSetupInTempDir(wd, { scope: "project" });
+
+      const refreshed = await readFile(configPath, "utf-8");
+      const parsed = TOML.parse(refreshed) as {
+        hooks?: { state?: Record<string, { trusted_hash?: unknown }> };
+      };
+      assert.equal(parsed.hooks?.state?.[foreignKey]?.trusted_hash, foreignHash);
+      assert.equal(
+        (refreshed.match(/^# OMX-owned Codex hook trust state$/gm) ?? []).length,
+        1,
+      );
+      assert.equal(
+        (refreshed.match(/^# End OMX-owned Codex hook trust state$/gm) ?? []).length,
+        1,
+      );
+
+      await runSetupInTempDir(wd, { scope: "project" });
+      assert.equal(await readFile(configPath, "utf-8"), refreshed);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
     }
   });
 });
