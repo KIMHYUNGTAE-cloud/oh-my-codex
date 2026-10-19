@@ -1124,4 +1124,104 @@ describe("agents/native-config", () => {
       await rm(codexHome, { recursive: true, force: true });
     }
   });
+
+  it("resolves profile-scoped model before root fallback (Codex finding 4309857268)", async () => {
+    const codexHome = join(tmpdir(), `omx-profile-model-priority-test-${process.pid}`);
+    try {
+      // Create a config.toml with:
+      // - Root model: astra
+      // - Profile-scoped custom provider + model: custom_glm
+      // When the profile is active, metadata should reflect the profile model, not root
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'profile = "custom-lane"',
+        'model = "gpt-6-astra"',
+        '',
+        '[profiles.custom-lane]',
+        'model_provider = "custom-glm-provider"',
+        'model = "custom-glm-4.0"',
+      ].join("\n"));
+
+      // With profile-scoped custom provider + model + root astra,
+      // planner should use profile model for metadata, not root astra
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      // Should NOT emit astra guidance (the root model)
+      assert.doesNotMatch(plannerToml, /exact gpt-6-astra model/, "planner should not resolve to root astra when profile has custom provider with model");
+      // Should NOT have astra in resolved_model if custom provider is active
+      assert.doesNotMatch(plannerToml, /resolved_model: gpt-6-astra/, "planner metadata should not report root model when profile model is configured");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps exact pins when built-in provider omits model field (Codex finding 4309857276)", async () => {
+    const codexHome = join(tmpdir(), `omx-builtin-no-model-test-${process.pid}`);
+    try {
+      // Create a config.toml with explicit built-in provider (openai-chatgpt) but NO model field
+      // This should behave like the implicit default provider and keep exact pins
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'model_provider = "openai-chatgpt"',
+        // Intentionally NO model field
+      ].join("\n"));
+
+      // With explicit built-in provider but no root model,
+      // planner should STILL bake exactModel (like implicit default)
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(plannerToml, /model = "gpt-6-astra"/, "planner should bake exactModel when built-in provider is explicit even without root model");
+      assert.match(plannerToml, /exact gpt-6-astra model/, "planner should receive exact guidance when built-in provider is explicit without root model");
+
+      // Same for architect
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(architectToml, /model = "gpt-6-astra"/, "architect should bake exactModel when built-in provider is explicit without root model");
+      assert.match(architectToml, /exact gpt-6-astra model/, "architect should receive exact guidance when built-in provider is explicit without root model");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("omits fallback metadata for custom provider without root or profile model (Codex finding 4309974425)", async () => {
+    const codexHome = join(tmpdir(), `omx-custom-provider-no-model-test-${process.pid}`);
+    try {
+      // Create a config.toml with custom provider but NO root model and NO profile model
+      // The agent will inherit the custom provider's default model at runtime
+      // So we should NOT emit resolved_model metadata claiming astra
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'model_provider = "custom-provider-x"',
+        '',
+        '[model_providers.custom-provider-x]',
+        'name = "custom-provider-x"',
+        'base_url = "http://localhost:8000/v1"',
+        'wire_api = "openai"',
+        'requires_openai_auth = false',
+        'env_key = "CUSTOM_PROVIDER_X_API_KEY"',
+      ].join("\n"));
+
+      // With custom provider and no root/profile model,
+      // planner should NOT emit resolved_model metadata
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(plannerToml, /^model\s*=/m, "planner should not bake model field with custom provider and no root model");
+      assert.doesNotMatch(plannerToml, /resolved_model:/, "planner should not emit resolved_model metadata with custom provider and no root model");
+      assert.doesNotMatch(plannerToml, /exact gpt-6-astra model/, "planner should not emit astra guidance with custom provider and no root model");
+
+      // Same for architect
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.doesNotMatch(architectToml, /^model\s*=/m, "architect should not bake model field with custom provider and no root model");
+      assert.doesNotMatch(architectToml, /resolved_model:/, "architect should not emit resolved_model metadata with custom provider and no root model");
+      assert.doesNotMatch(architectToml, /exact gpt-6-astra model/, "architect should not emit astra guidance with custom provider and no root model");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
 });
