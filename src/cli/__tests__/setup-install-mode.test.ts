@@ -1720,6 +1720,49 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
+	it("does not suggest codex plugin remove for dry-run repair with live pin", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-dry-run-live-pin-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					await mkdir(join(wd, ".omx"), { recursive: true });
+					const hudConfigPath = join(wd, ".omx", "hud-config.json");
+					const userHudConfig = '{"preset":"custom"}\n';
+					await writeFile(hudConfigPath, userHudConfig);
+					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
+					assert.ok(packagedMarketplace);
+					const initial = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
+					assert.equal(initial.status, "materialized");
+					const cacheDir = initial.cacheDir!;
+
+					// Register a live pin
+					await registerOmxPluginCacheLivePin(cacheDir, "dry-run-live-session", process.pid);
+
+					// Run setup with dry-run and repair - should NOT suggest removal
+					const dryRunOutput = await captureConsoleOutput(async () => {
+						await setup({
+							scope: "user",
+							installMode: "plugin",
+							repairPluginCache: true,
+							dryRun: true,
+							pluginAgentsMdPrompt: async () => false,
+							codexFeaturesProbe: () => "hooks stable true\nplugin_hooks experimental true\ngoals experimental true\n",
+							codexVersionProbe: () => "codex-cli 0.999.0",
+						});
+					});
+
+					// Verify that the live pin was detected
+					assert.match(dryRunOutput, /pinned by a live Codex session/);
+					// Verify that removal was NOT suggested (because the live pin makes it unsafe)
+					assert.doesNotMatch(dryRunOutput, /codex plugin remove/);
+					assert.match(dryRunOutput, /close that session before repairing it/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects scoped plugin-cache repair outside plugin setup mode", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-plugin-cache-mode-"));
 		try {

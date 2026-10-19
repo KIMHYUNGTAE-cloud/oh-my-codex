@@ -3494,7 +3494,7 @@ export interface OmxPluginCacheMaterializeResult {
 	preservedDirs?: string[];
 	reason?: string;
 	launcherTarget?: string;
-	removalSafe?: boolean;
+	removalSafe: boolean;
 }
 
 export const PLUGIN_LAUNCHER_RECOVERY_HINT = "omx setup --plugin --repair-plugin-cache";
@@ -3839,9 +3839,9 @@ async function materializePackagedOmxPluginCacheImpl(
 	packagedMarketplace: PackagedOmxMarketplace | null,
 	options: MaterializePackagedOmxPluginCacheOptions = {},
 ): Promise<OmxPluginCacheMaterializeResult> {
-	if (!packagedMarketplace) return { status: "unavailable" };
+	if (!packagedMarketplace) return { status: "unavailable", removalSafe: false };
 	const version = await packagedOmxPluginVersion(packagedMarketplace);
-	if (!version) return { status: "unavailable" };
+	if (!version) return { status: "unavailable", removalSafe: false };
 	const cacheDir = join(omxPluginCacheBase(codexHomeDir), version);
 	const inspectedCacheDir = options.anchoredCacheDir ?? cacheDir;
 	if (await hasExpectedOmxPluginCache(codexHomeDir, packagedMarketplace, {
@@ -3855,6 +3855,7 @@ async function materializePackagedOmxPluginCacheImpl(
 			retiredDirs: options.dryRun
 				? []
 				: await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+			removalSafe: false,
 		};
 	}
 	// Same-version directory exists but is not byte-identical: distinguish immutable-preserved vs dead/provenance-incompatible launcher.
@@ -3876,7 +3877,7 @@ async function materializePackagedOmxPluginCacheImpl(
 			? await inspectSnapshotRepairEligibility(options.anchoredCacheBaseRef, version)
 			: { eligible: false, reason: `incomplete cache claim at ${cacheDir} cannot be safely inspected without an anchored cache namespace; preserving it` };
 		if (options.dryRun && options.repairCache && eligibility.eligible) {
-			return { status: "materialized", cacheDir, version, retiredDirs: [] };
+			return { status: "materialized", cacheDir, version, retiredDirs: [], removalSafe: false };
 		}
 		return {
 			status: "stale-launcher",
@@ -3887,6 +3888,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				: eligibility.reason,
 			launcherTarget: undefined,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 	}
 	if (rootState === "directory" && !options.repairCache) {
@@ -3899,6 +3901,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: incompat.reason,
 				launcherTarget: incompat.target,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+				removalSafe: false,
 			};
 		}
 		// #3699: an existing same-version snapshot is immutable, so a Team-mode change
@@ -3918,6 +3921,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: `${teamModeSkillReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT}`,
 				launcherTarget: undefined,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+				removalSafe: false,
 			};
 		}
 		const snapshotProvenanceReason = await omxPluginCacheProvenanceReason(
@@ -3934,6 +3938,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: `${snapshotProvenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT}`,
 				launcherTarget: undefined,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+				removalSafe: false,
 			};
 		}
 		const assetProvenanceReason = await omxPluginCacheExecutedAssetProvenanceReason(inspectedCacheDir);
@@ -3945,6 +3950,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: `${assetProvenanceReason}; run ${PLUGIN_LAUNCHER_RECOVERY_HINT}`,
 				launcherTarget: undefined,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+				removalSafe: false,
 			};
 		}
 		return {
@@ -3952,18 +3958,19 @@ async function materializePackagedOmxPluginCacheImpl(
 			cacheDir,
 			version,
 			retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+			removalSafe: false,
 		};
 	}
 	if (rootState === "foreign") {
-		return { status: "unavailable", cacheDir, version };
+		return { status: "unavailable", cacheDir, version, removalSafe: false };
 	}
 	if (rootState === "directory" && options.repairCache && options.dryRun) {
 		const eligibility = options.anchoredCacheBaseRef
 			? await inspectSnapshotRepairEligibility(options.anchoredCacheBaseRef, version)
 			: { eligible: false, reason: `same-version cache at ${cacheDir} cannot be safely inspected without an anchored cache namespace; preserving it` };
 		return eligibility.eligible
-			? { status: "materialized", cacheDir, version, retiredDirs: [] }
-			: { status: "stale-launcher", cacheDir, version, reason: eligibility.reason, launcherTarget: undefined, retiredDirs: [] };
+			? { status: "materialized", cacheDir, version, retiredDirs: [], removalSafe: true }
+			: { status: "stale-launcher", cacheDir, version, reason: eligibility.reason, launcherTarget: undefined, retiredDirs: [], removalSafe: false };
 	}
 	if (!options.dryRun) {
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
@@ -3977,6 +3984,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: "platform cannot provide no-follow directory anchoring for immutable cache publication",
 				launcherTarget: undefined,
 				retiredDirs: [],
+				removalSafe: false,
 			};
 		}
 		let cacheBaseRef = options.anchoredCacheBaseRef;
@@ -4008,6 +4016,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: `cannot claim immutable OMX plugin cache publication at ${cacheBase}: ${(error as Error).message}`,
 				launcherTarget: undefined,
 				retiredDirs: [],
+				removalSafe: false,
 			};
 		}
 		let tempName: string | undefined;
@@ -4018,6 +4027,7 @@ async function materializePackagedOmxPluginCacheImpl(
 			cacheDir,
 			version,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 		let cleanupError: unknown = null;
 		let finalRef: DirectoryRef | undefined;
@@ -4072,6 +4082,7 @@ async function materializePackagedOmxPluginCacheImpl(
 										reason: `same-version OMX plugin cache could not be reclaimed after repair at ${cacheDir}: ${(retryError as Error).message}`,
 										launcherTarget: undefined,
 										retiredDirs: [],
+										removalSafe: false,
 									};
 								}
 							} else {
@@ -4082,7 +4093,7 @@ async function materializePackagedOmxPluginCacheImpl(
 									reason: repair.reason ?? `same-version OMX plugin cache cannot be repaired at ${cacheDir}`,
 									launcherTarget: undefined,
 									retiredDirs: [],
-									removalSafe: repair.removalSafe,
+									removalSafe: repair.removalSafe ?? false,
 								};
 							}
 						} else {
@@ -4093,6 +4104,7 @@ async function materializePackagedOmxPluginCacheImpl(
 								reason: `same-version OMX plugin cache already exists at ${cacheDir}; refusing to replace or remove an existing directory; run ${PLUGIN_LAUNCHER_RECOVERY_HINT}`,
 								launcherTarget: undefined,
 								retiredDirs: [],
+								removalSafe: false,
 							};
 						}
 					} else {
@@ -4147,6 +4159,7 @@ async function materializePackagedOmxPluginCacheImpl(
 						reason: `same-version OMX plugin cache appeared concurrently at ${cacheDir}; refusing to replace an immutable cache`,
 						launcherTarget: undefined,
 						retiredDirs: [],
+						removalSafe: false,
 					};
 				} else {
 					throw error;
@@ -4173,6 +4186,7 @@ async function materializePackagedOmxPluginCacheImpl(
 						reason: `immutable OMX plugin cache retirement failed closed: ${(error as Error).message}`,
 						launcherTarget: undefined,
 						retiredDirs: [],
+						removalSafe: false,
 					};
 				}
 			}
@@ -4184,6 +4198,7 @@ async function materializePackagedOmxPluginCacheImpl(
 			reason: `immutable OMX plugin cache publication failed closed: ${(error as Error).message}`,
 			launcherTarget: undefined,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 	} finally {
 			if (publicationLockGuard) clearInterval(publicationLockGuard.timer);
@@ -4225,6 +4240,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				version,
 				reason: `immutable OMX plugin cache publication cleanup failed closed: ${(cleanupError as Error).message}`,
 				launcherTarget: undefined,
+				removalSafe: false,
 				retiredDirs: [],
 			};
 		}
@@ -4237,6 +4253,7 @@ async function materializePackagedOmxPluginCacheImpl(
 		retiredDirs: options.dryRun
 			? []
 			: await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+		removalSafe: false,
 	};
 }
 
@@ -4245,9 +4262,9 @@ export async function materializePackagedOmxPluginCache(
 	packagedMarketplace: PackagedOmxMarketplace | null,
 	options: MaterializePackagedOmxPluginCacheOptions = {},
 ): Promise<OmxPluginCacheMaterializeResult> {
-	if (!packagedMarketplace) return { status: "unavailable" };
+	if (!packagedMarketplace) return { status: "unavailable", removalSafe: false };
 	const version = await packagedOmxPluginVersion(packagedMarketplace);
-	if (!version) return { status: "unavailable" };
+	if (!version) return { status: "unavailable", removalSafe: false };
 	const cacheBase = omxPluginCacheBase(codexHomeDir);
 	const cacheDir = join(cacheBase, version);
 	const noFollowFlags = fsConstants.O_NOFOLLOW;
@@ -4260,6 +4277,7 @@ export async function materializePackagedOmxPluginCache(
 			reason: "platform cannot provide no-follow directory anchoring for immutable cache validation/publication",
 			launcherTarget: undefined,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 	}
 	let namespace: { handle: FileHandle; fdPath: string; path: string; handles: FileHandle[] } | null;
@@ -4275,12 +4293,13 @@ export async function materializePackagedOmxPluginCache(
 				reason: `cannot anchor OMX plugin cache namespace at ${cacheBase}: ${code}; refusing to trust or publish cache contents`,
 				launcherTarget: undefined,
 				retiredDirs: [],
+				removalSafe: false,
 			};
 		}
 		throw error;
 	}
 	if (!namespace) {
-		return { status: "materialized", cacheDir, version, retiredDirs: [] };
+		return { status: "materialized", cacheDir, version, retiredDirs: [], removalSafe: false };
 	}
 	const cacheBaseFdPath = namespace.fdPath;
 	let result: OmxPluginCacheMaterializeResult;
@@ -4308,6 +4327,7 @@ export async function materializePackagedOmxPluginCache(
 			reason: `anchored OMX plugin cache operation failed closed: ${(error as Error).message}`,
 			launcherTarget: undefined,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 	}
 	let closeError: unknown = null;
@@ -4326,6 +4346,7 @@ export async function materializePackagedOmxPluginCache(
 			reason: `anchored OMX plugin cache descriptor close failed closed: ${(closeError as Error).message}`,
 			launcherTarget: undefined,
 			retiredDirs: [],
+			removalSafe: false,
 		};
 	}
 	return result;

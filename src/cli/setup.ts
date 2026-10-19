@@ -4797,7 +4797,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			: `  warning: local Codex plugin cache at ${pluginCacheMaterialize.cacheDir} is not safe to use as current (${pluginCacheMaterialize.reason}); not reporting as current.`;
 			console.log(warningMessage);
 			// Only suggest removal if the removal is safe: exclude live pins, late pins, and untrusted entries
-			if (pluginCacheMaterialize.removalSafe !== false) {
+			if (pluginCacheMaterialize.removalSafe === true) {
 				console.log(
 					`  Run \`codex plugin remove ${OMX_PLUGIN_NAME}@${OMX_LOCAL_MARKETPLACE_NAME} --json\` then rerun \`omx setup --plugin\` to rebuild the snapshot for ${preflightMarketplace?.packageRoot ?? pkgRoot}.`,
 				);
