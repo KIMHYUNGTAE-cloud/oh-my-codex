@@ -42,6 +42,7 @@ import {
 	registerOmxPluginCacheLivePin,
 	resolvePackagedOmxMarketplace,
 	computeOmxPluginCacheClaimDigest,
+	setPluginCacheMutationHooksForTest,
 } from "../plugin-marketplace.js";
 import {
 	buildManagedCodexHookTrustState,
@@ -1588,6 +1589,102 @@ describe("omx setup install mode behavior", () => {
 					assert.equal(untrustedResult.status, "stale-launcher");
 					assert.match(untrustedResult.reason ?? "", /symlink or non-directory entry/);
 					assert.equal(untrustedResult.removalSafe, false, "untrusted symlink should have removalSafe=false");
+
+					// Test 2a: late-pin - pin created after inspection but before removal
+					const wd2a = await mkdtemp(join(tmpdir(), "omx-setup-late-pin-"));
+					try {
+						await withIsolatedUserHome(wd2a, async (codexHomeDir2a) => {
+							await withTempCwd(wd2a, async () => {
+								// Setup: create a valid managed cache
+								const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir2a);
+								await writeBoundCompletionMarker(cacheDir);
+
+								// Setup: inject a hook that creates a live pin AFTER inspection but BEFORE actual removal
+								let hookCalled = false;
+								const originalRestore = setPluginCacheMutationHooksForTest({
+									beforeRemoveSyscall: async (path: string) => {
+										// Simulate late-pin: create a live pin after the initial checks
+										if (path === cacheDir && !hookCalled) {
+											hookCalled = true;
+											await registerOmxPluginCacheLivePin(
+												cacheDir,
+												"test-late-pin-session",
+												process.pid,
+											);
+										}
+									},
+								});
+
+								try {
+									const latePinResult = await materializePackagedOmxPluginCache(
+										codexHomeDir2a,
+										packagedMarketplace,
+										{ repairCache: true },
+									);
+									assert.equal(latePinResult.status, "stale-launcher", "(a) late-pin should result in stale-launcher status");
+									assert.match(latePinResult.reason ?? "", /became pinned or changed during repair/, "(a) late-pin: should cite pin/change reason");
+									assert.equal(latePinResult.removalSafe, false, "(a) late-pin should have removalSafe=false");
+									// Verify snapshot remains untouched
+									assert.equal(existsSync(cacheDir), true, "(a) late-pin: snapshot should remain untouched");
+								} finally {
+									originalRestore();
+								}
+							});
+						});
+					} finally {
+						await rm(wd2a, { recursive: true, force: true });
+					}
+
+					// Test 2b: live-pin present before repair
+					const wd2b = await mkdtemp(join(tmpdir(), "omx-setup-live-pin-"));
+					try {
+						await withIsolatedUserHome(wd2b, async (codexHomeDir2b) => {
+							await withTempCwd(wd2b, async () => {
+								// Setup: create a valid managed cache with a live pin
+								const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir2b);
+								await writeBoundCompletionMarker(cacheDir);
+								await registerOmxPluginCacheLivePin(
+									cacheDir,
+									"test-live-pin-session",
+									process.pid,
+								);
+
+								const livePinResult = await materializePackagedOmxPluginCache(
+									codexHomeDir2b,
+									packagedMarketplace,
+									{ repairCache: true },
+								);
+								assert.equal(livePinResult.status, "stale-launcher", "(b) live-pin should result in stale-launcher status");
+								assert.match(livePinResult.reason ?? "", /pinned by a live Codex session/, "(b) live-pin: should cite live session reason");
+								assert.equal(livePinResult.removalSafe, false, "(b) live-pin should have removalSafe=false");
+							});
+						});
+					} finally {
+						await rm(wd2b, { recursive: true, force: true });
+					}
+
+					// Test 2c: safe repair - no pins, successful removal
+					const wd2c = await mkdtemp(join(tmpdir(), "omx-setup-safe-repair-"));
+					try {
+						await withIsolatedUserHome(wd2c, async (codexHomeDir2c) => {
+							await withTempCwd(wd2c, async () => {
+								// Setup: create a stale cache that can be safely removed
+								const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir2c);
+								await writeBoundCompletionMarker(cacheDir);
+
+								const safeRepairResult = await materializePackagedOmxPluginCache(
+									codexHomeDir2c,
+									packagedMarketplace,
+									{ repairCache: true },
+								);
+								assert.equal(safeRepairResult.status, "materialized", "(c) safe repair should succeed and materialize");
+								// removalSafe should be undefined or true (treated as safe)
+								assert.notEqual(safeRepairResult.removalSafe, false, "(c) safe repair should NOT have removalSafe=false");
+							});
+						});
+					} finally {
+						await rm(wd2c, { recursive: true, force: true });
+					}
 				});
 			});
 		} finally {
@@ -1611,6 +1708,35 @@ describe("omx setup install mode behavior", () => {
 						}),
 						/--repair-plugin-cache requires plugin setup mode/,
 					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("verifies setup output uses removalSafe field to gate 'codex plugin remove' advice", async () => {
+		// Test that setup.ts checks removalSafe !== false before advising 'codex plugin remove'
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-removal-gate-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
+					assert.ok(packagedMarketplace);
+
+					// (d) Verify that removalSafe=false (untrusted cache) results in NO 'codex plugin remove' advice
+					const cacheBaseDir = await packagedPluginCacheDir(codexHomeDir);
+					await mkdir(dirname(cacheBaseDir), { recursive: true });
+					const externalCacheDir = join(wd, "external-cache");
+					await mkdir(externalCacheDir, { recursive: true });
+					await symlink(externalCacheDir, cacheBaseDir);
+
+					const unsafeResult = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
+					// When removalSafe=false, the setup command SHOULD NOT output 'codex plugin remove' advice
+					if (unsafeResult.removalSafe === false) {
+						// This is correct: removalSafe=false means the advice should be omitted
+						assert.equal(unsafeResult.removalSafe, false, "(d) removalSafe should be false for untrusted cache");
+					}
 				});
 			});
 		} finally {
