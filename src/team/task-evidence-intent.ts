@@ -62,7 +62,7 @@ function namesOutputFile(clause: string): boolean {
       const beforeMatch = context.split(/\b(?:for|about)\b/i).at(-1) ?? '';
       const sourceContext = beforeMatch;
       if (!explicitFile && /^(?:in|at)$/i.test(preposition)
-        && (/\b(?:on|about)\b/i.test(sourceContext)
+        && (/\b(?:on|about)\b/i.test(sourceContext) || /\b(?:about)\b/i.test(context)
           || (!/\bfor\b/i.test(context) && /\bof\b/i.test(context)))) return false;
       const quoted = doubleQuoted ?? singleQuoted ?? backtickQuoted;
       const path = quoted === undefined ? token ?? '' : Buffer.from(quoted, 'hex').toString('utf8');
