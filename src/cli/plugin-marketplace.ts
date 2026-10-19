@@ -3534,10 +3534,12 @@ export async function readPinnedLauncherRaw(cacheDir: string): Promise<{ raw: st
 	}
 }
 
+type LauncherIncompatibilityKind = "drift" | "incompatible";
+
 export async function getPinnedLauncherIncompatibilityReason(
 	cacheDir: string,
 	packagedMarketplace: PackagedOmxMarketplace,
-): Promise<{ reason: string; target?: string } | null> {
+): Promise<{ reason: string; target?: string; kind?: LauncherIncompatibilityKind } | null> {
 	const recoveryHint = `run ${PLUGIN_LAUNCHER_RECOVERY_HINT}`;
 	const hooksDir = join(cacheDir, "hooks");
 	try {
@@ -3596,7 +3598,7 @@ export async function getPinnedLauncherIncompatibilityReason(
 		return { reason: `pinned launcher command is not absolute: ${command}; ${recoveryHint}`, target };
 	}
 	if (!existsSync(command)) {
-		return { reason: `pinned launcher command does not exist: ${command}; ${recoveryHint}`, target };
+		return { reason: `pinned launcher command does not exist: ${command}; ${recoveryHint}`, target, kind: "drift" };
 	}
 	const expectedCommand = process.execPath;
 	const [canonicalActualCommand, canonicalExpectedCommand] = await Promise.all([
@@ -3610,7 +3612,7 @@ export async function getPinnedLauncherIncompatibilityReason(
 		return { reason: `pinned launcher target is not absolute: ${target}; ${recoveryHint}`, target };
 	}
 	if (!existsSync(target)) {
-		return { reason: `pinned launcher target does not exist: ${target} (package root removed?); ${recoveryHint}`, target };
+		return { reason: `pinned launcher target does not exist: ${target} (package root removed?); ${recoveryHint}`, target, kind: "drift" };
 	}
 	const expectedTarget = join(packagedMarketplace.packageRoot, "dist", "cli", "omx.js");
 	const [canonicalActual, canonicalExpected] = await Promise.all([
@@ -3894,8 +3896,8 @@ async function materializePackagedOmxPluginCacheImpl(
 	if (rootState === "directory" && !options.repairCache) {
 		const incompat = await getPinnedLauncherIncompatibilityReason(inspectedCacheDir, packagedMarketplace);
 		if (incompat) {
-			// Dead launcher (command or target doesn't exist) is safe to remove and rebuild
-			const isDeadLauncher = incompat.reason.includes("does not exist");
+			// Launcher drift (command or target doesn't exist) is safe to remove and rebuild
+			const isSafeToRemove = incompat.kind === "drift";
 			return {
 				status: "stale-launcher",
 				cacheDir,
@@ -3903,7 +3905,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: incompat.reason,
 				launcherTarget: incompat.target,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
-				removalSafe: isDeadLauncher,
+				removalSafe: isSafeToRemove,
 			};
 		}
 		// #3699: an existing same-version snapshot is immutable, so a Team-mode change
