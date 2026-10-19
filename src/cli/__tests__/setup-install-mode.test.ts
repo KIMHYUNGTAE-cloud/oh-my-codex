@@ -707,7 +707,15 @@ async function seedSameVersionPluginCacheWithStaleHooks(codexHomeDir: string): P
 	assert.ok(preToolUse, "expected packaged plugin PreToolUse hook fixture");
 	preToolUse.matcher = "Bash";
 	await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n");
-	await writeFile(join(cacheDir, ".omx-managed"), `${process.pid}\n`);
+	const manifest = JSON.parse(await readFile(join(packageRoot, "plugins", "oh-my-codex", ".codex-plugin", "plugin.json"), "utf-8")) as { version: string };
+	const ownershipRecord = {
+		version: 1,
+		cacheVersion: manifest.version,
+		pid: 99999999,
+		processStartHash: null,
+		livePinSupportVersion: 1,
+	};
+	await writeFile(join(cacheDir, ".omx-managed"), `${JSON.stringify(ownershipRecord)}\n`);
 	await writeBoundCompletionMarker(cacheDir);
 	return cacheDir;
 }
@@ -723,7 +731,15 @@ async function seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir: string)
 		join(cacheDir, "hooks", "omx-command.json"),
 		JSON.stringify({ command: "/stale/node", argsPrefix: ["/stale/omx.js"] }, null, 2) + "\n",
 	);
-	await writeFile(join(cacheDir, ".omx-managed"), `${process.pid}\n`);
+	const manifest = JSON.parse(await readFile(join(packageRoot, "plugins", "oh-my-codex", ".codex-plugin", "plugin.json"), "utf-8")) as { version: string };
+	const ownershipRecord = {
+		version: 1,
+		cacheVersion: manifest.version,
+		pid: 99999999,
+		processStartHash: null,
+		livePinSupportVersion: 1,
+	};
+	await writeFile(join(cacheDir, ".omx-managed"), `${JSON.stringify(ownershipRecord)}\n`);
 	await writeBoundCompletionMarker(cacheDir);
 	return cacheDir;
 }
@@ -1607,13 +1623,21 @@ describe("omx setup install mode behavior", () => {
 								const originalRestore = setPluginCacheMutationHooksForTest({
 									beforeRemoveSyscall: async (path: string) => {
 										// Simulate late-pin: create a live pin after the initial checks
-										if (path === cacheDir && !hookCalled) {
+										// Run the hook only once, the first time it's called
+										if (!hookCalled) {
 											hookCalled = true;
-											await registerOmxPluginCacheLivePin(
-												cacheDir,
-												"test-late-pin-session",
-												process.pid,
-											);
+											const { createHash } = await import("node:crypto");
+											const sessionHash = createHash("sha256").update("test-late-pin-session").digest("hex");
+											const pinDir = join(path, ".omx-live-pin");
+											await mkdir(pinDir, { recursive: true });
+											const pinRecord = {
+												version: 1,
+												pid: process.pid,
+												processStartHash: null,
+												sessionHash,
+											};
+											const pinFilePath = join(pinDir, `session-${sessionHash}.json`);
+											await writeFile(pinFilePath, `${JSON.stringify(pinRecord)}\n`);
 										}
 									},
 								});
