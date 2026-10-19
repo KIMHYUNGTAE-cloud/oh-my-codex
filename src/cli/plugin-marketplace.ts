@@ -3494,6 +3494,7 @@ export interface OmxPluginCacheMaterializeResult {
 	preservedDirs?: string[];
 	reason?: string;
 	launcherTarget?: string;
+	removalSafe?: boolean;
 }
 
 export const PLUGIN_LAUNCHER_RECOVERY_HINT = "omx setup --plugin --repair-plugin-cache";
@@ -3758,7 +3759,7 @@ async function removeManagedSnapshotForRepair(
 	cacheBaseRef: DirectoryRef,
 	version: string,
 	publicationLockGuard: PublicationLockGuard,
-): Promise<{ removed: boolean; reason?: string }> {
+): Promise<{ removed: boolean; reason?: string; removalSafe?: boolean }> {
 	await publicationLockGuard.assertOwned();
 	let snapshotRef: DirectoryRef;
 	try {
@@ -3769,7 +3770,10 @@ async function removeManagedSnapshotForRepair(
 	}
 	try {
 		const eligibility = await inspectManagedSnapshotForRepair(snapshotRef, version, cacheBaseRef);
-		if (eligibility.reason) return { removed: false, reason: eligibility.reason };
+		if (eligibility.reason) {
+			// Removal unsafe: live pin, unverified snapshot, or other structural issues
+			return { removed: false, reason: eligibility.reason, removalSafe: false };
+		}
 		await publicationLockGuard.assertOwned();
 		const removed = await removeChildIfIdentity(cacheBaseRef, version, eligibility.stats, {
 			recursive: true,
@@ -3779,7 +3783,11 @@ async function removeManagedSnapshotForRepair(
 		});
 		return removed
 			? { removed: true }
-			: { removed: false, reason: `same-version cache at ${snapshotRef.path} became pinned or changed during repair` };
+			: {
+					removed: false,
+					reason: `same-version cache at ${snapshotRef.path} became pinned or changed during repair`,
+					removalSafe: false,
+			};
 	} finally {
 		await snapshotRef.handle.close();
 	}
@@ -3860,6 +3868,7 @@ async function materializePackagedOmxPluginCacheImpl(
 			reason: `OMX plugin cache root at ${cacheDir} is a symlink or non-directory entry; refusing to replace unverified cache content; ${getUntrustedOmxPluginCacheRecoveryHint(cacheDir)}`,
 			launcherTarget: undefined,
 			retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
+			removalSafe: false,
 		};
 	}
 	if (rootState === "incomplete" && (!options.repairCache || options.dryRun)) {
@@ -4073,6 +4082,7 @@ async function materializePackagedOmxPluginCacheImpl(
 									reason: repair.reason ?? `same-version OMX plugin cache cannot be repaired at ${cacheDir}`,
 									launcherTarget: undefined,
 									retiredDirs: [],
+									removalSafe: repair.removalSafe,
 								};
 							}
 						} else {

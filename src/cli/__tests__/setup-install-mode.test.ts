@@ -1561,14 +1561,16 @@ describe("omx setup install mode behavior", () => {
 						{ dryRun: true, repairCache: true },
 					);
 					assert.equal(unverifiedDryRun.status, "stale-launcher");
-					assert.match(unverifiedDryRun.reason ?? "", /not a verified managed OMX snapshot/);
-					assert.equal(existsSync(join(cacheDir, ".omx-managed")), false);
-				});
+				assert.match(unverifiedDryRun.reason ?? "", /not a verified managed OMX snapshot/);
+				assert.equal(existsSync(join(cacheDir, ".omx-managed")), false);
 			});
-		} finally {
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
+		});
+	} finally {
+		await rm(wd, { recursive: true, force: true });
+	}
+});
+
+
 
 	it("rejects scoped plugin-cache repair outside plugin setup mode", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-plugin-cache-mode-"));

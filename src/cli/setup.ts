@@ -4792,14 +4792,12 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			console.log("  Local Codex plugin cache already exposes packaged OMX skills.");
 		} else if (pluginCacheMaterialize.status === "stale-launcher") {
 			const isProvenanceMismatch = pluginCacheMaterialize.reason?.includes("provenance mismatch");
-			const isPinnedByLiveSession = pluginCacheMaterialize.reason?.includes("pinned by a live Codex session");
-			const isUntrustedCacheEntry = pluginCacheMaterialize.reason?.includes("symlink or non-directory entry");
-			const isBecamePinnedDuringRepair = pluginCacheMaterialize.reason?.includes("became pinned or changed during repair");
 			const warningMessage = isProvenanceMismatch
 			? `  warning: local Codex plugin cache at ${pluginCacheMaterialize.cacheDir} has incompatible launcher provenance (${pluginCacheMaterialize.reason}); not reporting as current.`
 			: `  warning: local Codex plugin cache at ${pluginCacheMaterialize.cacheDir} is not safe to use as current (${pluginCacheMaterialize.reason}); not reporting as current.`;
 			console.log(warningMessage);
-			if (!isPinnedByLiveSession && !isUntrustedCacheEntry && !isBecamePinnedDuringRepair) {
+			// Only suggest removal if the removal is safe: exclude live pins, late pins, and untrusted entries
+			if (pluginCacheMaterialize.removalSafe !== false) {
 				console.log(
 					`  Run \`codex plugin remove ${OMX_PLUGIN_NAME}@${OMX_LOCAL_MARKETPLACE_NAME} --json\` then rerun \`omx setup --plugin\` to rebuild the snapshot for ${preflightMarketplace?.packageRoot ?? pkgRoot}.`,
 				);
