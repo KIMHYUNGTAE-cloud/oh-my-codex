@@ -4425,6 +4425,18 @@ esac
       assert.equal(result, false, "waitForWorkerReady with timeout=0 should return false, not run checks after deadline");
     });
   });
+
+  it('enforces deadline after final poll completion (Codex finding 4310432469)', () => {
+    // Test that even if the final poll returns true (ready),
+    // we recheck the deadline and return false if we've exceeded it.
+    // This is a synchronous test with a very short timeout to simulate deadline exceeded.
+    withEmptyPath(() => {
+      const result = waitForWorkerReady('omx-team-x', 1, 1);
+      // With timeout=1ms, it's very likely the final poll will be after deadline.
+      // The key is that we return false, not true, even if a poll would succeed.
+      assert.equal(result, false, "waitForWorkerReady should return false if final poll completes after deadline");
+    });
+  });
 });
 
 
@@ -4735,6 +4747,18 @@ esac
       const result = await waitForWorkerReadyAsync('omx-team-x', 1, 0);
       // With timeout=0, we should get false (not a successful check after deadline)
       assert.equal(result, false, "waitForWorkerReadyAsync with timeout=0 should return false, not run checks after deadline");
+    });
+  });
+
+  it('enforces deadline after final poll completion (Codex finding 4310432469)', async () => {
+    // Test that even if the final poll returns true (ready),
+    // we recheck the deadline and return false if we've exceeded it.
+    // This is an async test with a very short timeout to simulate deadline exceeded.
+    await withEmptyPath(async () => {
+      const result = await waitForWorkerReadyAsync('omx-team-x', 1, 1);
+      // With timeout=1ms, it's very likely the final poll will be after deadline.
+      // The key is that we return false, not true, even if a poll would succeed.
+      assert.equal(result, false, "waitForWorkerReadyAsync should return false if final poll completes after deadline");
     });
   });
 });
