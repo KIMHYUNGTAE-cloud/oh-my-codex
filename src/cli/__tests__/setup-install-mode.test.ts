@@ -1668,9 +1668,9 @@ describe("omx setup install mode behavior", () => {
 					try {
 						await withIsolatedUserHome(wd2b, async (codexHomeDir2b) => {
 							await withTempCwd(wd2b, async () => {
-								// Setup: create a valid managed cache with a live pin
-								const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir2b);
-								await writeBoundCompletionMarker(cacheDir);
+								// Setup: create a managed cache with a stale launcher and a live pin
+								// This ensures the test exercises the repair eligibility path (not the unchanged fast path)
+								const cacheDir = await seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir2b);
 								await registerOmxPluginCacheLivePin(
 									cacheDir,
 									"test-live-pin-session",

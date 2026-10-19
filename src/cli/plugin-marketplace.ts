@@ -3900,8 +3900,17 @@ async function materializePackagedOmxPluginCacheImpl(
 	if (rootState === "directory" && !options.repairCache) {
 		const incompat = await getPinnedLauncherIncompatibilityReason(inspectedCacheDir, packagedMarketplace);
 		if (incompat) {
-			// Launcher drift (command or target doesn't exist) is safe to remove and rebuild
+			// Launcher drift (command or target doesn't exist) can only be marked as safe to remove
+			// after verifying the snapshot is managed and unpinned
 			const isSafeToRemove = incompat.kind === "drift";
+			let removalSafe = false;
+			if (isSafeToRemove) {
+				// Verify removal safety: snapshot must be managed and unpinned
+				const eligibility = options.anchoredCacheBaseRef
+					? await inspectSnapshotRepairEligibility(options.anchoredCacheBaseRef, version)
+					: { eligible: false, reason: `incomplete cache claim at ${cacheDir} cannot be safely inspected without an anchored cache namespace` };
+				removalSafe = eligibility.eligible;
+			}
 			return {
 				status: "stale-launcher",
 				cacheDir,
@@ -3909,7 +3918,7 @@ async function materializePackagedOmxPluginCacheImpl(
 				reason: incompat.reason,
 				launcherTarget: incompat.target,
 				retiredDirs: options.dryRun ? [] : await retireUnpinnedManagedSnapshots(codexHomeDir, version, options.anchoredCacheBaseRef),
-				removalSafe: isSafeToRemove,
+				removalSafe,
 			};
 		}
 		// #3699: an existing same-version snapshot is immutable, so a Team-mode change
@@ -3973,6 +3982,9 @@ async function materializePackagedOmxPluginCacheImpl(
 		return { status: "unavailable", cacheDir, version, removalSafe: false };
 	}
 	if (rootState === "directory" && options.repairCache && options.dryRun) {
+		// For dry-run repair against an unchanged byte-identical cache, do NOT bypass the unchanged fast path.
+		// The dry-run must mirror the real-run decision tree exactly, including unchanged detection.
+		// If cache has not changed but we were asked to repair it, check eligibility to preview what would happen.
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
 		let cacheBaseRef = options.anchoredCacheBaseRef;
 		let ownsCacheBaseRef = false;
