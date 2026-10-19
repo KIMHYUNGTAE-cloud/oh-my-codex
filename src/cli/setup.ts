@@ -84,6 +84,7 @@ import type { CodexHookFeatureFlag, CodexPluginHookFeatureFlag } from "../config
 import {
 	buildManagedCodexNativeHookWindowsShimContent,
 	buildManagedCodexNativeHookWindowsShimPath,
+	buildManagedCodexNativeHookWindowsShimPathForFilesystem,
 	escapeTomlBasicString,
 	planManagedCodexHooksMerge,
 	planManagedCodexHooksRemoval,
@@ -4017,7 +4018,7 @@ async function planNativeHookSetupTransaction(
 	let shimArtifact: NativeHookTransactionArtifact | null = null;
 	let shimPrecondition: NativeHookTransactionPrecondition | null = null;
 	if (options.platform === "win32") {
-		const shimPath = buildManagedCodexNativeHookWindowsShimPath(options.codexHomeDir);
+		const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(options.codexHomeDir);
 		const shimSnapshot = await captureNativeHookTransactionArtifact(
 			shimPath,
 			`native hook Windows shim ${shimPath}`,
@@ -4251,7 +4252,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 				getNotifyMetadataPath(scopeDirs.codexHomeDir),
 				...(nativeHookTransactionPlatform === "win32"
 					? [
-							buildManagedCodexNativeHookWindowsShimPath(
+							buildManagedCodexNativeHookWindowsShimPathForFilesystem(
 								scopeDirs.codexHomeDir,
 							),
 						]

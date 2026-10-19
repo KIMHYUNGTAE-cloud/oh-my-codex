@@ -12,6 +12,7 @@ import {
   buildManagedCodexHooksConfig,
   buildManagedCodexNativeHookWindowsShimContent,
   buildManagedCodexNativeHookWindowsShimPath,
+  buildManagedCodexNativeHookWindowsShimPathForFilesystem,
 } from '../../config/codex-hooks.js';
 import { setUninstallClaimJournalDurabilityForTest, uninstall } from '../uninstall.js';
 import TOML from '@iarna/toml';
@@ -722,7 +723,7 @@ describe('omx uninstall', () => {
           const codexDir = join(wd, '.codex');
           const configPath = join(codexDir, 'config.toml');
           const hooksPath = join(codexDir, 'hooks.json');
-          const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+          const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
           const metadataPath = join(codexDir, '.omx', 'notify-dispatch.json');
           const hooks = `${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
             platform: 'win32',
@@ -809,7 +810,7 @@ describe('omx uninstall', () => {
           const codexDir = join(wd, '.codex');
           const configPath = join(codexDir, 'config.toml');
           const hooksPath = join(codexDir, 'hooks.json');
-          const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+          const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
           const metadataPath = join(codexDir, '.omx', 'notify-dispatch.json');
           const config = buildOmxConfig().replace(
             '# End oh-my-codex',
@@ -863,7 +864,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir: codexDir,
@@ -906,7 +907,7 @@ describe('omx uninstall', () => {
       await withDriveQualifiedWindowsCodexHome(wd, async (codexHomeDir) => {
         const configPath = join(codexHomeDir, 'config.toml');
         const hooksPath = join(codexHomeDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexHomeDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexHomeDir);
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir,
@@ -949,8 +950,9 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
-        const shimAlias = shimPath
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
+        const shimPathWindows = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimAlias = shimPathWindows
           .replace(/[\\/]+hooks[\\/]+/i, '\\hooks\\\\.\\')
           .replace(/omx-native-hook-windows-shim\.ps1$/i, 'OMX-NATIVE-HOOK-WINDOWS-SHIM.PS1')
           .replace(/\\/g, '/');
@@ -993,7 +995,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir: codexDir,
@@ -1044,7 +1046,7 @@ describe('omx uninstall', () => {
           const codexDir = join(wd, '.codex');
           const configPath = join(codexDir, 'config.toml');
           const hooksPath = join(codexDir, 'hooks.json');
-          const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+          const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
           const shimAlias = shimPath
             .replace(/[\\/]+hooks[\\/]+/i, '\\hooks\\\\.\\')
             .replace(/omx-native-hook-windows-shim\.ps1$/i, 'OMX-NATIVE-HOOK-WINDOWS-SHIM.PS1')
@@ -1119,7 +1121,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir: codexDir,
@@ -1171,7 +1173,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const managed = buildManagedCodexHooksConfig(packageRoot(), {
           platform: 'win32',
           codexHomeDir: codexDir,
@@ -1222,7 +1224,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const config = buildOmxConfig();
         const hooks = `${JSON.stringify(
           buildManagedCodexHooksConfig(packageRoot(), {
@@ -1272,7 +1274,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const config = buildOmxConfig();
         const hooks = `${JSON.stringify(
           buildManagedCodexHooksConfig(packageRoot(), {
@@ -1310,7 +1312,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const config = buildOmxConfig();
         const hooks = `${JSON.stringify(
           buildManagedCodexHooksConfig(packageRoot(), {
@@ -1450,7 +1452,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const replacementPath = join(wd, 'concurrent-user-hooks.json');
         const config = buildOmxConfig();
         const hooks = `${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
@@ -1822,7 +1824,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const metadataPath = join(codexDir, '.omx', 'notify-dispatch.json');
         const dispatcherPath = join(packageRoot(), 'dist', 'scripts', 'notify-dispatcher.js');
         const hooks = `${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
@@ -1890,7 +1892,7 @@ describe('omx uninstall', () => {
           const codexDir = join(wd, '.codex');
           const configPath = join(codexDir, 'config.toml');
           const hooksPath = join(codexDir, 'hooks.json');
-          const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+          const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
           const config = Buffer.from(buildOmxConfig(), 'utf-8');
           const hooks = Buffer.from(`${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
             platform: 'win32',
@@ -2982,7 +2984,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const stagedShimPath = join(dirname(shimPath), '.shim-preflight-recovery');
         const config = Buffer.from(buildOmxConfig(), 'utf-8');
         const hooks = Buffer.from(`${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
@@ -3026,7 +3028,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         const foreignConfigPath = join(codexDir, '.foreign-restored-config');
         const config = Buffer.from(buildOmxConfig(), 'utf-8');
         const hooks = Buffer.from(`${JSON.stringify(buildManagedCodexHooksConfig(packageRoot(), {
@@ -3187,7 +3189,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         await mkdir(codexDir, { recursive: true });
         await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());
@@ -3241,7 +3243,7 @@ describe('omx uninstall', () => {
         const codexDir = join(wd, '.codex');
         const configPath = join(codexDir, 'config.toml');
         const hooksPath = join(codexDir, 'hooks.json');
-        const shimPath = buildManagedCodexNativeHookWindowsShimPath(codexDir);
+        const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(codexDir);
         await mkdir(codexDir, { recursive: true });
         await mkdir(dirname(shimPath), { recursive: true });
         await writeFile(configPath, buildOmxConfig());

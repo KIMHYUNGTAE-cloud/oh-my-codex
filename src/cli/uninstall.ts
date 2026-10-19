@@ -35,6 +35,7 @@ import {
 import {
   buildManagedCodexNativeHookWindowsShimContent,
   buildManagedCodexNativeHookWindowsShimPath,
+  buildManagedCodexNativeHookWindowsShimPathForFilesystem,
   classifyManagedCodexNativeHookWindowsShimOwnership,
   escapeTomlBasicString,
   planManagedCodexHooksRemoval,
@@ -429,7 +430,7 @@ async function planHooksRemoval(
 
   if (platform !== "win32") return { hooks, plan };
 
-  const shimPath = buildManagedCodexNativeHookWindowsShimPath(dirname(hooks.path));
+  const shimPath = buildManagedCodexNativeHookWindowsShimPathForFilesystem(dirname(hooks.path));
   const shim = await readFileSnapshot(shimPath, {
     strictUtf8: false,
     // On non-Windows hosts the test-only platform seam intentionally produces
