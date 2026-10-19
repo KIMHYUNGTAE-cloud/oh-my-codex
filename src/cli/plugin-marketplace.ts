@@ -3991,7 +3991,7 @@ async function materializePackagedOmxPluginCacheImpl(
 	}
 	if (!options.dryRun) {
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
-	const noFollowFlags = fsConstants.O_NOFOLLOW;
+		const noFollowFlags = fsConstants.O_NOFOLLOW;
 		const directoryFlags = fsConstants.O_DIRECTORY;
 		if (process.platform !== "win32" && (typeof noFollowFlags !== "number" || typeof directoryFlags !== "number")) {
 			return {
@@ -4199,17 +4199,17 @@ async function materializePackagedOmxPluginCacheImpl(
 					if (preservedDirs.length > 0) outcome.preservedDirs = preservedDirs;
 					// Successful publication: repair was safe (no pins/obstacles detected and removed)
 					outcome.removalSafe = true;
-	} catch (error) {
-		outcome = {
-			status: "stale-launcher",
-			cacheDir,
-			version,
-			reason: `immutable OMX plugin cache publication failed closed: ${(error as Error).message}`,
-			launcherTarget: undefined,
-			retiredDirs: [],
-			removalSafe: false,
-		};
-	}
+				} catch (error) {
+					outcome = {
+						status: "stale-launcher",
+						cacheDir,
+						version,
+						reason: `immutable OMX plugin cache retirement failed closed: ${(error as Error).message}`,
+						launcherTarget: undefined,
+						retiredDirs: [],
+						removalSafe: false,
+					};
+				}
 			}
 		} catch (error) {
 			outcome = {
