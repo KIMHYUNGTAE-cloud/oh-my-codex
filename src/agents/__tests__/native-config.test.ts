@@ -1081,4 +1081,47 @@ describe("agents/native-config", () => {
       await rm(codexHome, { recursive: true, force: true });
     }
   });
+
+  it("resolves profile model before falling back to env vars (Codex P2 finding)", async () => {
+    const codexHome = join(tmpdir(), `omx-profile-env-priority-test-${process.pid}`);
+    const origFrontierModel = process.env.OMX_DEFAULT_FRONTIER_MODEL;
+    try {
+      // Create a config.toml with profile-scoped built-in provider and model, but no root model
+      // Also set OMX_DEFAULT_FRONTIER_MODEL env var to a different model
+      // The profile model should take precedence and planner should return exactModel
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(join(codexHome, "config.toml"), [
+        'profile = "work-lane"',
+        '',
+        '[profiles.work-lane]',
+        'model_provider = "openai-chatgpt"',
+        'model = "gpt-6-luna"',
+      ].join("\n"));
+
+      // Set env var to a different model
+      process.env.OMX_DEFAULT_FRONTIER_MODEL = "gpt-5.6-terra";
+
+      // With profile-scoped built-in provider and model + env var set,
+      // planner should return exactModel (gpt-6-astra), not the env var default
+      const plannerToml = generateAgentToml(AGENT_DEFINITIONS.planner, "planner prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(plannerToml, /model = "gpt-6-astra"/, "planner should bake exactModel, not env var default, when profile model is set");
+      assert.match(plannerToml, /exact gpt-6-astra model/, "planner should receive astra guidance, not fall back to env var");
+
+      // Same for architect
+      const architectToml = generateAgentToml(AGENT_DEFINITIONS.architect, "architect prompt", {
+        codexHomeOverride: codexHome,
+      });
+      assert.match(architectToml, /model = "gpt-6-astra"/, "architect should bake exactModel, not env var default");
+      assert.match(architectToml, /exact gpt-6-astra model/, "architect should receive astra guidance");
+    } finally {
+      if (typeof origFrontierModel === "string") {
+        process.env.OMX_DEFAULT_FRONTIER_MODEL = origFrontierModel;
+      } else {
+        delete process.env.OMX_DEFAULT_FRONTIER_MODEL;
+      }
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
 });

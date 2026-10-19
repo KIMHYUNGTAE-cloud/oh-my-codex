@@ -192,11 +192,11 @@ function resolveAgentModel(
   }
   const effectiveProvider = getCodexConfigEffectiveModelProvider(options.codexHomeOverride);
   const isBuiltin = isBuiltinProvider(effectiveProvider);
-  const hasConfiguredModel = isModelConfiguredAtRoot(options.codexHomeOverride);
+  const hasConfiguredModel = isModelConfigured(options.codexHomeOverride);
   // Only use exactModel when a built-in provider is configured.
   // When a custom/third-party provider is configured, skip exactModel and resolve based on modelClass,
   // allowing the agent to work with models available in that provider.
-  // Also skip exactModel when no model is configured at root (even if a custom provider is set),
+  // Also skip exactModel when no model is configured (root or profile) (even if a custom provider is set),
   // to avoid baking astra guidance for provider-only configurations.
   if (agent.exactModel && isBuiltin && (hasConfiguredModel || !effectiveProvider)) {
     return agent.exactModel;
