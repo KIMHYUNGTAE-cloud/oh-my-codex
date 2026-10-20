@@ -873,6 +873,24 @@ describe('subagents/tracker', () => {
     }
   });
 
+  it('covers hosts without resume_agent in SessionStart reopen guidance', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omx-3866-tracker-no-resume-tool-'));
+    try {
+      const path = subagentTrackingPath(cwd);
+      mkdirSync(join(cwd, '.omx', 'state'), { recursive: true });
+      writeFileSync(path, JSON.stringify({ schemaVersion: 1, sessions: { root: { session_id: 'root', updated_at: '2026-07-23T00:00:00.000Z', threads: {
+        child: { thread_id: 'child', kind: 'subagent', provenance_kind: NATIVE_SUBAGENT_PROVENANCE, direct_child_root_id: 'root', direct_child_parent_id: 'root', status: 'available', first_seen_at: '2026-07-23T00:00:00.000Z', last_seen_at: '2026-07-23T00:00:00.000Z', turn_count: 1 },
+      } } } }));
+      // Without resume_agent in availableTools, guidance warns and does not instruct the call
+      const contextWithoutTool = consumeDirectChildReopenContext(cwd, { sessionId: 'root', rootNativeSessionId: 'root', source: 'resume', availableTools: ['Read', 'Edit'] }) ?? '';
+      assert.match(contextWithoutTool, /resume_agent tool is not advertised/);
+      assert.doesNotMatch(contextWithoutTool, /resume_agent\("child"\)/);
+      assert.match(contextWithoutTool, /Do not spawn a same-role\/same-lane replacement solely because persisted reopen was unavailable/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('revokes direct-child authority when an authoritative observation moves it under a nested parent', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'omx-3284-tracker-direct-to-nested-'));
     try {

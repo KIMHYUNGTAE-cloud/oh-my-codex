@@ -1355,6 +1355,7 @@ export interface DirectChildReopenContext {
   sessionId: string;
   rootNativeSessionId: string;
   source: string;
+  availableTools?: readonly string[] | readonly { name: string }[] | null;
 }
 
 function formatReopenMetadata(entry: SubagentLedgerEntry): string {
@@ -1384,6 +1385,17 @@ function persistedReopenLegacyNotice(excludedCount: number, source: string): str
     `- Notice: ${excludedCount} persisted subagent record(s) were excluded as non-authoritative or legacy; no resume authority or bookkeeping was granted.`,
     '- Silver rule: do not spawn a same-role/same-lane replacement solely because persisted reopen authority was unavailable; continue in the root or another compatible existing lane.',
   ].join('\n');
+}
+
+function hasResumeAgentTool(tools: readonly string[] | readonly { name: string }[] | null | undefined): boolean {
+  // When tools list is not provided, assume the tool is available (can't determine).
+  // Only report unavailability when we have explicit evidence that it's absent.
+  if (!tools || tools.length === 0) return true;
+  return tools.some((tool) => {
+    const name = typeof tool === 'string' ? tool : tool.name ?? '';
+    // Match both fully qualified and flattened forms
+    return name === 'resume_agent' || name === 'collaborationresume_agent' || name.endsWith('.resume_agent');
+  });
 }
 
 /**
@@ -1698,15 +1710,24 @@ export function consumeDirectChildReopenContext(
       '[Persisted subagent reopen]',
       `- SessionStart source: ${context.source}; saved subagent ids found: ${savedSubagents.length}.`,
     ];
+    const hasResumeAgent = hasResumeAgentTool(context.availableTools);
     if (reopenTargets.length) {
-      lines.push('- Reopen these persisted subagents by id before continuing work or spawning any same-role/same-lane replacement:');
-      lines.push(...reopenTargets.slice(0, 12).map((entry) => `  - resume_agent(${JSON.stringify(entry.agentId)})${formatReopenMetadata(entry)}`));
-      if (reopenTargets.length > 12) lines.push(`  - ... ${reopenTargets.length - 12} more saved subagent id(s) omitted from this compact SessionStart context; consult .omx/state/subagent-tracking.json before spawning replacements.`);
+      if (hasResumeAgent) {
+        lines.push('- Reopen these persisted subagents by id before continuing work or spawning any same-role/same-lane replacement:');
+        lines.push(...reopenTargets.slice(0, 12).map((entry) => `  - resume_agent(${JSON.stringify(entry.agentId)})${formatReopenMetadata(entry)}`));
+        if (reopenTargets.length > 12) lines.push(`  - ... ${reopenTargets.length - 12} more saved subagent id(s) omitted from this compact SessionStart context; consult .omx/state/subagent-tracking.json before spawning replacements.`);
+      } else {
+        lines.push('- Warning: resume_agent tool is not advertised by this host; persisted reopen is unavailable.');
+        lines.push('- Persisted subagent ids are available: consult .omx/state/subagent-tracking.json for eligible resume targets.');
+        lines.push('- Do not spawn a same-role/same-lane replacement solely because persisted reopen was unavailable; continue in the root or another compatible existing lane.');
+      }
     } else {
       lines.push('- No compatible saved subagent id is currently marked reopenable; do not spawn a replacement merely because reopen was unavailable.');
     }
     lines.push('- Silver rule: when follow-up work targets an existing role/lane, reuse the matching reopened id; avoid duplicate same-type subagent spawns.');
-    lines.push('- If resume_agent fails, surface a clear warning with the id and reason, then continue in the root or another compatible existing lane; do not spawn a new agent solely because reopen failed.');
+    if (hasResumeAgent) {
+      lines.push('- If resume_agent fails, surface a clear warning with the id and reason, then continue in the root or another compatible existing lane; do not spawn a new agent solely because reopen failed.');
+    }
     const warnings = [...new Map([...unavailableTargets, ...failedTargets].map((entry) => [entry.agentId, entry])).values()];
     if (warnings.length) {
       lines.push('- Reopen warnings:');

@@ -41,7 +41,7 @@ export const LEADER_CONDUCTOR_DELEGATION_NOTE =
 export const LEADER_CONDUCTOR_REUSE_AND_LEDGER_RULES = [
   'Conductor mode is a Main-root contract only; typed subagents never receive this block.',
   'Use .omx/state/subagent-tracking.json as the source of truth for saved subagent ids and recovery order.',
-  'On SessionStart, eagerly attempt resume_agent(<subagent id>) for every saved subagent id before spawning any replacement agent.',
+  'On SessionStart, if resume_agent is available, eagerly attempt resume_agent(<subagent id>) for every saved subagent id before spawning any replacement agent. If resume_agent is unavailable, continue in the root or another compatible existing lane; do not spawn a replacement solely because reopen is unavailable.',
   'ralplan consensus planning may activate Conductor; autopilot rework stays exempt.',
 ] as const;
 
