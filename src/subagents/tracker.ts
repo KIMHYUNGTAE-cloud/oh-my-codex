@@ -1698,10 +1698,14 @@ export function consumeDirectChildReopenContext(
     const unavailableTargets = savedSubagents.filter((entry) => entry.status === 'unavailable');
     const failedTargets = savedSubagents.filter((entry) => entry.resumeFailedAt || entry.resumeFailureReason);
     const now = new Date().toISOString();
-    for (const target of reopenTargets) {
-      session.threads[target.threadId] = { ...session.threads[target.threadId]!, resume_requested_at: now };
+    const hasResumeAgent = hasResumeAgentTool(context.availableTools);
+    // Only record resume requests when the tool is actually available and will be called
+    if (hasResumeAgent && reopenTargets.length) {
+      for (const target of reopenTargets) {
+        session.threads[target.threadId] = { ...session.threads[target.threadId]!, resume_requested_at: now };
+      }
     }
-    if (reopenTargets.length || changed) {
+    if ((hasResumeAgent && reopenTargets.length) || changed) {
       session.updated_at = now;
       lock.assertOwnership();
       writeSubagentTrackingStateSync(cwd, state, lock.publish);
@@ -1710,7 +1714,6 @@ export function consumeDirectChildReopenContext(
       '[Persisted subagent reopen]',
       `- SessionStart source: ${context.source}; saved subagent ids found: ${savedSubagents.length}.`,
     ];
-    const hasResumeAgent = hasResumeAgentTool(context.availableTools);
     if (reopenTargets.length) {
       if (hasResumeAgent) {
         lines.push('- Reopen these persisted subagents by id before continuing work or spawning any same-role/same-lane replacement:');

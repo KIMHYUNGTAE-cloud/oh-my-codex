@@ -2312,7 +2312,8 @@ async function buildPersistedSubagentReopenContext(
     return null;
   }
   try {
-    const toolsValue = safeObject(options.payload).available_tools;
+    const payload = safeObject(options.payload);
+    const toolsValue = payload.available_tools ?? payload.availableTools ?? payload.tools;
     const availableTools = Array.isArray(toolsValue) ? toolsValue : null;
     return consumeDirectChildReopenContext(cwd, {
       sessionId: rootContext.sessionId,
