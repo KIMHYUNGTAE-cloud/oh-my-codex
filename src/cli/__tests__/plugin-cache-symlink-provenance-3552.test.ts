@@ -2014,4 +2014,34 @@ describe("issue 3552 P1 symlink trust bypass in unchanged fast paths", () => {
     }
   });
 
+  it("issue 4319671707: dry-run repair on unchanged cache returns unchanged, not materialized", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-4319671707-dry-run-unchanged-"));
+    try {
+      await withIsolatedUserHome(wd, async (codexHomeDir) => {
+        const packaged = await resolvePackagedOmxMarketplace(packageRoot);
+        assert.ok(packaged);
+        const cacheDir = await seedRegularSnapshot(codexHomeDir);
+        assert.equal((await lstat(cacheDir)).isSymbolicLink(), false);
+
+        // Real run without repair should return unchanged
+        const realRun = await materializePackagedOmxPluginCache(codexHomeDir, packaged);
+        assert.equal(realRun.status, "unchanged");
+
+        // Dry-run repair should ALSO return unchanged, not materialized or stale-launcher
+        const dryRunRepair = await materializePackagedOmxPluginCache(codexHomeDir, packaged, {
+          dryRun: true,
+          repairCache: true,
+        });
+        assert.equal(
+          dryRunRepair.status,
+          "unchanged",
+          `Dry-run repair on unchanged cache should return unchanged, not ${dryRunRepair.status}`,
+        );
+        assert.equal(dryRunRepair.reason, undefined, "Should have no reason text for unchanged status");
+      });
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
 });

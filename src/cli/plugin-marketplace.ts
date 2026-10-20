@@ -3984,7 +3984,22 @@ async function materializePackagedOmxPluginCacheImpl(
 	if (rootState === "directory" && options.repairCache && options.dryRun) {
 		// For dry-run repair against an unchanged byte-identical cache, do NOT bypass the unchanged fast path.
 		// The dry-run must mirror the real-run decision tree exactly, including unchanged detection.
-		// If cache has not changed but we were asked to repair it, check eligibility to preview what would happen.
+		// First verify if the cache is still byte-identical.
+		const isByteIdentical = await hasExpectedOmxPluginCache(codexHomeDir, packagedMarketplace, {
+			...options,
+			cacheDirOverride: inspectedCacheDir,
+		});
+		if (isByteIdentical) {
+			// Cache is unchanged: report unchanged just like real run does
+			return {
+				status: "unchanged",
+				cacheDir,
+				version,
+				retiredDirs: [],
+				removalSafe: false,
+			};
+		}
+		// Cache has changed: check eligibility to preview removal if needed
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
 		let cacheBaseRef = options.anchoredCacheBaseRef;
 		let ownsCacheBaseRef = false;

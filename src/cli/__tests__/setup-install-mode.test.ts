@@ -1738,7 +1738,8 @@ describe("omx setup install mode behavior", () => {
 					// Register a live pin
 					await registerOmxPluginCacheLivePin(cacheDir, "dry-run-live-session", process.pid);
 
-					// Run setup with dry-run and repair - should NOT suggest removal
+					// Run setup with dry-run and repair on byte-identical cache with live pin
+					// The cache is unchanged (byte-identical), so dry-run should return unchanged, not report removal
 					const dryRunOutput = await captureConsoleOutput(async () => {
 						await setup({
 							scope: "user",
@@ -1751,11 +1752,12 @@ describe("omx setup install mode behavior", () => {
 						});
 					});
 
-					// Verify that the live pin was detected
-					assert.match(dryRunOutput, /pinned by a live Codex session/);
-					// Verify that removal was NOT suggested (because the live pin makes it unsafe)
+					// Verify that removal was NOT suggested (because cache is unchanged)
 					assert.doesNotMatch(dryRunOutput, /codex plugin remove/);
-					assert.match(dryRunOutput, /close that session before repairing it/);
+					// Verify that "close that session" advice is NOT printed (because cache is unchanged, no repair needed)
+					assert.doesNotMatch(dryRunOutput, /close that session before repairing it/);
+					// Cache should report as already correct
+					assert.match(dryRunOutput, /Local Codex plugin cache already exposes packaged OMX skills/);
 				});
 			});
 		} finally {
