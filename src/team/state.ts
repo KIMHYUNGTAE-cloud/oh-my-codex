@@ -2151,10 +2151,12 @@ export async function readDispatchRequests(
     };
   });
   const authoritativeIds = new Set(authoritative.map((request) => request.request_id));
+  // Identify unmatched legacy-json candidates first to avoid loading the ledger in the common authoritative-only case
+  const unmatchedFallbacks = local.filter((request) => request.creation_transport === 'legacy-json'
+    && !authoritativeIds.has(request.request_id));
+  if (unmatchedFallbacks.length === 0) return merged;
   const runtimeIds = loadRuntimeDispatchIdentitySet(stateDir);
-  return [...merged, ...local.filter((request) => request.creation_transport === 'legacy-json'
-    && !authoritativeIds.has(request.request_id)
-    && !runtimeIds?.has(request.request_id))];
+  return [...merged, ...unmatchedFallbacks.filter((request) => !runtimeIds?.has(request.request_id))];
 }
 
 /** Read only strictly recognized target-team legacy request records for rollback scoping. */
