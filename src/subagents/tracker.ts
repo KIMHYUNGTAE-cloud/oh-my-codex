@@ -1387,12 +1387,12 @@ function persistedReopenLegacyNotice(excludedCount: number, source: string): str
   ].join('\n');
 }
 
-function hasResumeAgentTool(tools: readonly string[] | readonly { name: string }[] | null | undefined): boolean {
+function hasResumeAgentTool(tools: readonly string[] | readonly { name?: string; tool_name?: string; toolName?: string }[] | null | undefined): boolean {
   // When tools list is not provided, assume the tool is available (can't determine).
   // Only report unavailability when we have explicit evidence that it's absent.
   if (!tools || tools.length === 0) return true;
   return tools.some((tool) => {
-    const name = typeof tool === 'string' ? tool : tool.name ?? '';
+    const name = typeof tool === 'string' ? tool : (tool.name ?? tool.tool_name ?? tool.toolName ?? '');
     // Match both fully qualified and flattened forms
     return name === 'resume_agent' || name === 'collaborationresume_agent' || name.endsWith('.resume_agent');
   });
