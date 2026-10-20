@@ -60,7 +60,7 @@ import {
   withTaskClaimLock as withTaskClaimLockImpl,
   withMailboxLock as withMailboxLockImpl,
 } from './state/locks.js';
-import { hasRuntimeAuthority, hasRuntimeDispatchIdentity } from './state/dispatch-recovery.js';
+import { hasRuntimeAuthority, hasRuntimeDispatchIdentity, loadRuntimeDispatchIdentitySet } from './state/dispatch-recovery.js';
 import { getDefaultBridge, isBridgeEnabled, isStrictDispatchRecord, resolveBridgeStateDir, type DispatchRecord } from '../runtime/bridge.js';
 import {
   type TeamDispatchRequestStatus,
@@ -2151,9 +2151,10 @@ export async function readDispatchRequests(
     };
   });
   const authoritativeIds = new Set(authoritative.map((request) => request.request_id));
+  const runtimeIds = loadRuntimeDispatchIdentitySet(stateDir);
   return [...merged, ...local.filter((request) => request.creation_transport === 'legacy-json'
     && !authoritativeIds.has(request.request_id)
-    && !hasRuntimeDispatchIdentity(stateDir, request.request_id))];
+    && !runtimeIds?.has(request.request_id))];
 }
 
 /** Read only strictly recognized target-team legacy request records for rollback scoping. */

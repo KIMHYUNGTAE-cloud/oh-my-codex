@@ -3250,6 +3250,66 @@ exit 1
     }
   });
 
+  it('loads the dispatch identity ledger once per merge with multiple fallbacks', async (t) => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-dispatch-ledger-once-'));
+    const previousBridge = process.env.OMX_RUNTIME_BRIDGE;
+    try {
+      process.env.OMX_RUNTIME_BRIDGE = '1';
+      await initTeamState('alpha', 'dispatch', 'executor', 1, cwd);
+      const stateDir = join(cwd, '.omx/state');
+      const request = { kind: 'inbox', team_name: 'alpha', to_worker: 'worker-1', trigger_message: 'ping', status: 'pending' };
+      const requestsPath = join(stateDir, 'team/alpha/dispatch/requests.json');
+      
+      // Create multiple legacy-json fallbacks
+      const fallbackCount = 5;
+      const fallbacks = Array.from({ length: fallbackCount }, (_, i) => ({ 
+        ...request, 
+        request_id: `fallback-${i}`, 
+        creation_transport: 'legacy-json' as const 
+      }));
+      await writeFile(requestsPath, JSON.stringify(fallbacks));
+      
+      // Create dispatch-seen.json with some IDs to filter
+      const seenIds = ['fallback-0', 'fallback-2'];
+      await writeFile(join(stateDir, 'dispatch-seen.json'), JSON.stringify({ 
+        schema_version: 2, 
+        ledger_epoch: 1, 
+        request_ids: seenIds 
+      }));
+      
+      // Spy on readFileSync to count dispatch-seen.json reads
+      const originalReadFileSync = fs.readFileSync;
+      let dispatchSeenReadCount = 0;
+      t.mock.method(fs, 'readFileSync', (path: fs.PathLike, ...args: any[]) => {
+        if (String(path).includes('dispatch-seen.json')) dispatchSeenReadCount++;
+        return originalReadFileSync(path, ...args);
+      });
+      
+      try {
+        // Read dispatch requests - should load ledger once despite multiple fallbacks
+        const result = await readDispatchRequests('alpha', cwd);
+        
+        // Verify behavior: only fallbacks not in dispatch-seen should be returned
+        assert.deepEqual(
+          result.filter(r => r.creation_transport === 'legacy-json').map(r => r.request_id).sort(),
+          ['fallback-1', 'fallback-3', 'fallback-4']
+        );
+        
+        // Verify performance: dispatch-seen.json should be read exactly once
+        // (once for loadRuntimeDispatchIdentitySet, not once per fallback)
+        assert.equal(dispatchSeenReadCount, 1, 
+          `Expected 1 dispatch-seen.json read per merge, got ${dispatchSeenReadCount}`);
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      }
+    } finally {
+      if (previousBridge === undefined) delete process.env.OMX_RUNTIME_BRIDGE;
+      else process.env.OMX_RUNTIME_BRIDGE = previousBridge;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('rejects QueueDispatch schema failures without polluting existing runtime state', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-queue-schema-'));
     const previousBinary = process.env.OMX_RUNTIME_BINARY;

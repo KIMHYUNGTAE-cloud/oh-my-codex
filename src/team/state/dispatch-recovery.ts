@@ -25,6 +25,12 @@ export function hasRuntimeDispatchIdentity(stateDir: string, requestId: string):
   return readRuntimeDispatchRequestIds(stateDir)?.includes(requestId) ?? false;
 }
 
+/** Load the dispatch identity ledger once into a Set for efficient batch lookups. Returns null if the ledger doesn't exist. */
+export function loadRuntimeDispatchIdentitySet(stateDir: string): Set<string> | null {
+  const ids = readRuntimeDispatchRequestIds(stateDir);
+  return ids ? new Set(ids) : null;
+}
+
 // Callers select the team's request and hold its dispatch lock across journal and projection updates.
 export function recordRuntimeFinalization(stateDir: string, teamName: string, command: Extract<RuntimeCommand, { command: 'MarkNotified' | 'MarkDelivered' | 'MarkFailed' }>): void {
   // The identity ledger is atomically published; events and projections can be mid-write.
