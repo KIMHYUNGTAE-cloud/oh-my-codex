@@ -60,7 +60,7 @@ import {
   withTaskClaimLock as withTaskClaimLockImpl,
   withMailboxLock as withMailboxLockImpl,
 } from './state/locks.js';
-import { hasRuntimeAuthority, hasRuntimeDispatchIdentity, loadRuntimeDispatchIdentitySet } from './state/dispatch-recovery.js';
+import { hasRuntimeAuthority, loadRuntimeDispatchIdentitySet } from './state/dispatch-recovery.js';
 import { getDefaultBridge, isBridgeEnabled, isStrictDispatchRecord, resolveBridgeStateDir, type DispatchRecord } from '../runtime/bridge.js';
 import {
   type TeamDispatchRequestStatus,
