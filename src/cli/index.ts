@@ -3628,6 +3628,48 @@ export async function resolveLaunchConfigRepairOptions(
   };
 }
 
+/**
+ * Detects JetBrains IDE terminals where trackpad scrolling may be translated
+ * to arrow keys, causing the alternate screen mode issue.
+ * Returns true if a diagnostic should be emitted.
+ */
+export function shouldEmitJetBrainsScrollDiagnostic(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  // Only emit if --no-alt-screen is not already specified
+  if (args.includes("--no-alt-screen")) return false;
+
+  // Check for JetBrains terminal indicators
+  const termProgram = env.TERM_PROGRAM || "";
+  return (
+    termProgram.includes("JetBrains") ||
+    termProgram === "JediTerm" ||
+    termProgram.includes("WebStorm") ||
+    termProgram.includes("IntelliJ") ||
+    termProgram.includes("PyCharm") ||
+    termProgram.includes("CLion") ||
+    termProgram.includes("GoLand") ||
+    termProgram.includes("Rider") ||
+    termProgram.includes("DataGrip") ||
+    termProgram.includes("RubyMine") ||
+    termProgram.includes("PhpStorm") ||
+    env.TERMINAL_EMULATOR === "JetBrains-JediTerm"
+  );
+}
+
+/**
+ * Emits a diagnostic warning about trackpad scrolling in JetBrains terminals.
+ */
+function emitJetBrainsScrollDiagnostic(): void {
+  console.warn(
+    "[omx] warning: trackpad scrolling in this IDE's terminal may be translated to arrow keys, " +
+      "causing prompt history navigation instead of output scrolling.\n" +
+      "[omx] workaround: use 'omx --no-alt-screen' to disable alternate screen mode.\n" +
+      "[omx] for more info, see: https://github.com/Yeachan-Heo/oh-my-codex/issues/3872",
+  );
+}
+
 function runCodexBlocking(
   cwd: string,
   launchArgs: string[],
@@ -8309,6 +8351,9 @@ async function runCodex(
   } else if (launchPolicy === "direct") {
     // Detached HUD sessions require tmux. Skip the bootstrap entirely when the
     // binary is unavailable so direct launches do not emit noisy ENOENT logs.
+    if (shouldEmitJetBrainsScrollDiagnostic(launchArgs, process.env)) {
+      emitJetBrainsScrollDiagnostic();
+    }
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
     return { postLaunchHandledExternally: false };
   } else {
