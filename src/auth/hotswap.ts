@@ -91,6 +91,48 @@ function isAuthInvalidationError(stderr: string | undefined): boolean {
   return /token_invalidated|refresh_token_invalidated|authentication token has been invalidated/i.test(stderr || "");
 }
 
+/**
+ * Detects JetBrains IDE terminals where trackpad scrolling may be translated
+ * to arrow keys, causing the alternate screen mode issue.
+ * Returns true if a diagnostic should be emitted.
+ */
+function shouldEmitJetBrainsScrollDiagnostic(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  // Only emit if --no-alt-screen is not already specified
+  if (args.includes("--no-alt-screen")) return false;
+
+  // Check for JetBrains terminal indicators
+  const termProgram = env.TERM_PROGRAM || "";
+  return (
+    termProgram.includes("JetBrains") ||
+    termProgram === "JediTerm" ||
+    termProgram.includes("WebStorm") ||
+    termProgram.includes("IntelliJ") ||
+    termProgram.includes("PyCharm") ||
+    termProgram.includes("CLion") ||
+    termProgram.includes("GoLand") ||
+    termProgram.includes("Rider") ||
+    termProgram.includes("DataGrip") ||
+    termProgram.includes("RubyMine") ||
+    termProgram.includes("PhpStorm") ||
+    env.TERMINAL_EMULATOR === "JetBrains-JediTerm"
+  );
+}
+
+/**
+ * Emits a diagnostic warning about trackpad scrolling in JetBrains terminals.
+ */
+function emitJetBrainsScrollDiagnostic(): void {
+  process.stderr.write(
+    "[omx] warning: trackpad scrolling in this IDE's terminal may be translated to arrow keys, " +
+      "causing prompt history navigation instead of output scrolling.\n" +
+      "[omx] workaround: use 'omx --no-alt-screen' to disable alternate screen mode.\n" +
+      "[omx] for more info, see: https://github.com/Yeachan-Heo/oh-my-codex/issues/3872\n",
+  );
+}
+
 async function runCodexDirect(
   cwd: string,
   args: string[],
@@ -282,6 +324,10 @@ export async function runAuthHotswap(options: HotswapOptions): Promise<number> {
         baseEnv,
         lifecycle.sessionModelInstructionsPath(cwd, sessionId),
       );
+      // Emit JetBrains scroll diagnostic only once at the first attempt
+      if (attempt === 0 && shouldEmitJetBrainsScrollDiagnostic(attemptArgs, baseEnv)) {
+        emitJetBrainsScrollDiagnostic();
+      }
       process.stderr.write(`[omx auth] using slot ${currentSlot}\n`);
       const result = await runCodexDirect(cwd, attemptArgs, {
         ...baseEnv,
