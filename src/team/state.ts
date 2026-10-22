@@ -2103,7 +2103,8 @@ export async function readDispatchRequests(
     }
   } catch (error: unknown) {
     // Only suppress ENOENT (file doesn't exist); other errors (malformed JSON, permission denied, etc.) propagate as failures.
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+    const nodeError = error as NodeJS.ErrnoException | undefined;
+    if (nodeError?.code !== 'ENOENT') {
       throw error;
     }
     /* Missing legacy state has no requests. */
