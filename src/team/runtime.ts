@@ -6692,6 +6692,12 @@ async function deliverPendingMailboxMessages(
 
   // Phase 1+1.5: Identify, re-validate, and enqueue unnotified messages inside the barrier.
   await withTeamTaskMembershipBarrier(teamName, cwd, async () => {
+    // Test hook: allow injecting operations between Phase 1 (discovery) and Phase 1.5 (enqueue).
+    // This enables testing that the Phase 1.5 re-validation prevents stale enqueues.
+    const hook = mailboxDeliveryAfterPhase1HookForTest;
+    if (hook) {
+      await hook(teamName, cwd);
+    }
     for (const worker of workers) {
       const workerInfo = config.workers.find((w) => w.name === worker.name);
       if (!workerInfo) continue;
@@ -6771,12 +6777,6 @@ async function deliverPendingMailboxMessages(
       }
     }
   });
-  
-  // Test hook: allow injecting operations between Phase 1 and Phase 2
-  const hook = mailboxDeliveryAfterPhase1HookForTest;
-  if (hook) {
-    await hook(teamName, cwd);
-  }
 
   // Phase 2: Finalize and notify outside the barrier to avoid holding the lock
   // during slow operations like waitForDispatchReceipt.
@@ -6864,6 +6864,15 @@ async function finalizeDispatchedMailboxMessage(params: {
       dispatchPolicy,
       cwd,
     });
+  }
+
+  // Re-read the dispatch request to check if it was delivered after Phase 1.5 enqueue.
+  // An acknowledgement in prompt mode or transport_direct can land immediately after Phase 1.5
+  // and mark the request delivered before this finalization runs.
+  const currentRequest = await readDispatchRequest(teamName, requestId, cwd).catch(() => null);
+  if (!currentRequest || currentRequest.status === 'delivered') {
+    // Message was already delivered by an intervening acknowledgement; skip notification.
+    return { ok: true, transport: 'mailbox', reason: 'stale_after_acknowledgement', request_id: requestId, message_id: messageId };
   }
 
   const direct = await notifyWorkerOutcome(config, workerInfo.index, triggerDirective.text, workerInfo.pane_id);

@@ -3,12 +3,14 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { afterEach, beforeEach, it, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { getDefaultBridge, RuntimeBridge, type DispatchRecord, type RuntimeCommand } from '../../runtime/bridge.js';
 import { drainPendingTeamDispatch } from '../../scripts/notify-hook/team-dispatch.js';
 import { executeTeamApiOperation } from '../api-interop.js';
 import { queueDirectMailboxMessage } from '../mcp-comm.js';
+import { readTeamConfig, readTeamManifestV2, saveTeamConfig } from '../state.js';
 import {
   enqueueDispatchRequest, initTeamState, listDispatchRequests, listMailboxMessages,
   markDispatchRequestNotified, readDispatchRequest, removeDispatchRequestsForWorkers,
@@ -40,6 +42,42 @@ async function fixture(t: TestContext): Promise<string> {
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await initTeamState('recovery', 'delivery recovery', 'executor', 2, cwd);
   return cwd;
+}
+
+async function fixtureWithLiveWorkers(t: TestContext): Promise<{ cwd: string; workers: ReturnType<typeof spawn>[] }> {
+  const cwd = await fixture(t);
+  const workers: ReturnType<typeof spawn>[] = [];
+  
+  // Create live worker processes (sleepers that stay alive)
+  for (let i = 0; i < 2; i++) {
+    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: false });
+    workers.push(worker);
+  }
+  
+  // Update config to use prompt mode with live worker PIDs
+  const config = await readTeamConfig('recovery', cwd);
+  assert.ok(config);
+  config.worker_launch_mode = 'prompt';
+  config.workers[0]!.pid = workers[0]!.pid;
+  config.workers[1]!.pid = workers[1]!.pid;
+  await saveTeamConfig(config, cwd);
+  
+  // Update manifest to match
+  const manifestPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'manifest.v2.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as any;
+  manifest.policy = { ...(manifest.policy || {}), worker_launch_mode: 'prompt' };
+  manifest.workers[0].pid = workers[0]!.pid;
+  manifest.workers[1].pid = workers[1]!.pid;
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  
+  // Cleanup workers after test
+  t.after(async () => {
+    for (const worker of workers) {
+      try { worker.kill('SIGKILL'); } catch {}
+    }
+  });
+  
+  return { cwd, workers };
 }
 
 function inboxInput(): TeamDispatchRequestInput {
@@ -337,19 +375,20 @@ it('does not enqueue stale wakes when monitor and acknowledgement race', async t
 });
 
 it('enqueue inside barrier after final re-validation prevents stale wakes', async t => {
-  const cwd = await fixture(t);
+  const { cwd } = await fixtureWithLiveWorkers(t);
   // Set up a scenario where an ack lands between Phase 1 discovery and Phase 1.5 enqueue.
   // Send an unnotified message.
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'unnotified', cwd);
   assert.ok(!message.notified_at);
   
-  // Use the test hook to inject an ack after Phase 1 (discovery) completes.
-  // This simulates an ack arriving between Phase 1 and Phase 1.5.
+  // Use the test hook to inject an ack after Phase 1 (discovery) completes but before Phase 1.5 enqueue.
+  // This simulates an ack arriving between Phase 1 discovery and Phase 1.5 enqueue/re-validation.
   let hookInvoked = false;
   const { setMailboxDeliveryAfterPhase1HookForTest } = await import('../runtime.js');
   setMailboxDeliveryAfterPhase1HookForTest(async (teamName: string, cwd: string) => {
     hookInvoked = true;
-    // Simulate ack landing after Phase 1 discovery, before Phase 1.5 enqueue.
+    // Acknowledge the message after Phase 1 discovery but before Phase 1.5 enqueue.
+    // The Phase 1.5 re-validation should catch this and skip the enqueue.
     await executeTeamApiOperation('mailbox-mark-delivered', {
       team_name: teamName,
       worker: 'worker-2',
@@ -358,22 +397,69 @@ it('enqueue inside barrier after final re-validation prevents stale wakes', asyn
   });
   
   try {
-    // Call monitorTeam to trigger Phase 1 discovery and Phase 1.5 enqueue with re-validation.
+    // Call monitorTeam to trigger Phase 1 discovery, Phase 1.5 re-validation (with hook running), and potential enqueue.
+    // The Phase 1.5 re-validation should catch that the message was delivered by the hook and skip the enqueue.
     await (await import('../runtime.js')).monitorTeam('recovery', cwd);
     assert.equal(hookInvoked, true, 'test hook should have been invoked');
     
-    // Verify that no new dispatch was enqueued (Phase 1.5 re-validation prevented it).
-    // The message should still be marked as delivered by the hook's ack.
+    // Verify that the hook's acknowledgement took effect.
     const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
     const msgAfterMonitor = mailbox.find(m => m.message_id === message.message_id);
     assert.ok(msgAfterMonitor?.delivered_at, 'message should have delivered_at set after hook ack');
     
-    // Verify no pending dispatch requests were created for this message.
+    // Verify that Phase 1.5 re-validation prevented the enqueue of the now-delivered message.
+    // No dispatch request should exist for this message after monitorTeam.
     const dispatchRequests = (await listDispatchRequests('recovery', cwd))
       .filter(r => r.message_id === message.message_id && (r.status === 'pending' || r.status === 'notified'));
-    assert.equal(dispatchRequests.length, 0, 'Phase 1.5 re-validation should have prevented enqueue of delivered message');
+    assert.equal(dispatchRequests.length, 0, 'Phase 1.5 re-validation should have prevented enqueue of already-delivered message');
   } finally {
     // Clean up: clear the test hook.
+    setMailboxDeliveryAfterPhase1HookForTest(null);
+  }
+});
+
+it('skips notification after intervening acknowledgement in transport_direct', async t => {
+  const { cwd } = await fixtureWithLiveWorkers(t);
+  // Set up a team with transport_direct mode to test the direct notification path.
+  const config = await readTeamConfig('recovery', cwd);
+  assert.ok(config);
+  const manifestPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'manifest.v2.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as any;
+  manifest.policy = { ...(manifest.policy || {}), dispatch_mode: 'transport_direct' };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  
+  // Send an unnotified message.
+  const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
+  assert.ok(!message.notified_at);
+  
+  // Use the hook to acknowledge the message after Phase 1 but before Phase 1.5 enqueue.
+  let hookInvoked = false;
+  const { setMailboxDeliveryAfterPhase1HookForTest } = await import('../runtime.js');
+  setMailboxDeliveryAfterPhase1HookForTest(async (teamName: string, cwd: string) => {
+    hookInvoked = true;
+    // Acknowledge after Phase 1 but before enqueue.
+    await executeTeamApiOperation('mailbox-mark-delivered', {
+      team_name: teamName,
+      worker: 'worker-2',
+      message_id: message.message_id,
+    }, cwd);
+  });
+  
+  try {
+    // Call monitorTeam. The re-validation should prevent the enqueue, so no notification should be sent.
+    await (await import('../runtime.js')).monitorTeam('recovery', cwd);
+    assert.equal(hookInvoked, true, 'test hook should have been invoked');
+    
+    // Verify that no dispatch request was created (Phase 1.5 re-validation prevented it).
+    const dispatchRequests = (await listDispatchRequests('recovery', cwd))
+      .filter(r => r.message_id === message.message_id && (r.status === 'pending' || r.status === 'notified'));
+    assert.equal(dispatchRequests.length, 0, 'Phase 1.5 re-validation should have prevented enqueue');
+    
+    // Verify that the message is marked as delivered.
+    const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
+    const msgAfter = mailbox.find(m => m.message_id === message.message_id);
+    assert.ok(msgAfter?.delivered_at, 'message should be marked as delivered');
+  } finally {
     setMailboxDeliveryAfterPhase1HookForTest(null);
   }
 });
