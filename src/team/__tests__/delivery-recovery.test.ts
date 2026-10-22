@@ -290,3 +290,48 @@ it('preserves unread fallback messages after a mailbox permission error', {
   assert.equal(await readFile(path, 'utf8'), before);
   assert.equal((await listMailboxMessages('recovery', 'worker-2', cwd))[0]?.message_id, original.message_id);
 });
+
+it('does not enqueue stale wakes when monitor and acknowledgement race', async t => {
+  const cwd = await fixture(t);
+  // Send a message that the monitor will find unnotified.
+  const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'unnotified', cwd);
+  assert.ok(!message.notified_at);
+  // Create a dispatch request for this message (simulating monitor's enqueue).
+  const pending = await enqueueDispatchRequest('recovery', {
+    kind: 'mailbox',
+    to_worker: 'worker-2',
+    worker_index: 2,
+    message_id: message.message_id,
+    trigger_message: 'check mailbox',
+    intent: 'pending-mailbox-review',
+  }, cwd);
+  assert.equal(pending.deduped, false);
+  await markDispatchRequestNotified('recovery', pending.request.request_id, {}, cwd);
+  // Now acknowledge the message (what the worker does).
+  const ackResult = await executeTeamApiOperation('mailbox-mark-delivered', {
+    team_name: 'recovery',
+    worker: 'worker-2',
+    message_id: message.message_id,
+  }, cwd);
+  assert.equal(ackResult.ok, true);
+  assert.equal(ackResult.data.dispatch_updated, true);
+  // The dispatch request should be marked as delivered.
+  const updated = await readDispatchRequest('recovery', pending.request.request_id, cwd);
+  assert.equal(updated?.status, 'delivered');
+  // Send a new message to verify it doesn't get coalesced into stale wakes.
+  const second = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'second', cwd);
+  const secondPending = await enqueueDispatchRequest('recovery', {
+    kind: 'mailbox',
+    to_worker: 'worker-2',
+    worker_index: 2,
+    message_id: second.message_id,
+    trigger_message: 'check mailbox',
+    intent: 'pending-mailbox-review',
+  }, cwd);
+  // The second message should create a new dispatch request, not coalesce into the old one.
+  assert.equal(secondPending.deduped, false);
+  // Verify no stale wakes remain: we should have exactly one pending dispatch (for the new message).
+  const active = (await listDispatchRequests('recovery', cwd)).filter(r => r.status === 'pending' || r.status === 'notified');
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.message_id, second.message_id);
+});

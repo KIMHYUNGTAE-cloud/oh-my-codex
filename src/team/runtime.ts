@@ -6679,47 +6679,69 @@ async function deliverPendingMailboxMessages(
 ): Promise<Record<string, string>> {
   const nextNotifications: Record<string, string> = {};
   const pendingIdsAcrossTeam = new Set<string>();
+  // Collect the unnotified messages to enqueue, protected by the barrier.
+  // This list is computed while holding the lock, then enqueued and notified outside it.
+  const toDispatch: Array<{ workerName: string; workerInfo: WorkerInfo; msg: unknown }> = [];
 
-  for (const worker of workers) {
-    const workerInfo = config.workers.find((w) => w.name === worker.name);
-    if (!workerInfo) continue;
-    const mailbox = await listMailboxMessages(teamName, worker.name, cwd);
-    const pending = mailbox.filter((m) => !m.delivered_at);
-    if (pending.length === 0) continue;
+  // Phase 1: Identify unnotified messages inside the barrier.
+  await withTeamTaskMembershipBarrier(teamName, cwd, async () => {
+    for (const worker of workers) {
+      const workerInfo = config.workers.find((w) => w.name === worker.name);
+      if (!workerInfo) continue;
+      const mailbox = await listMailboxMessages(teamName, worker.name, cwd);
+      const pending = mailbox.filter((m) => !m.delivered_at);
+      if (pending.length === 0) continue;
 
-    const pendingIds = pending.map((m) => m.message_id);
-    for (const id of pendingIds) pendingIdsAcrossTeam.add(id);
+      const pendingIds = pending.map((m) => m.message_id);
+      for (const id of pendingIds) pendingIdsAcrossTeam.add(id);
 
-    // Preserve already-tracked notification timestamps in the next snapshot.
-    for (const msg of pending) {
-      nextNotifications[msg.message_id] = msg.notified_at || previousNotifications[msg.message_id] || '';
-    }
-
-    // Only notify for messages that have never been successfully notified.
-    // Using a message-ID set prevents re-notification on every monitor poll
-    // (issue #116). A message is considered notified when either:
-    //   - notified_at is set in the mailbox file (persisted by markMessageNotified), or
-    //   - the message_id exists in previousNotifications from the last snapshot.
-    // Both checks use Boolean() so an empty-string value is treated as unnotified.
-    const unnotified = pending.filter(
-      (m) => !m.notified_at && !previousNotifications[m.message_id],
-    );
-    if (unnotified.length === 0) continue;
-    if (!worker.alive) continue;
-
-    for (const msg of unnotified) {
-      const outcome = await dispatchPendingMailboxMessage({
-        teamName,
-        workerName: worker.name,
-        workerInfo,
-        messageId: msg.message_id,
-        config,
-        dispatchPolicy,
-        cwd,
-      });
-      if (outcome.ok) {
-        nextNotifications[msg.message_id] = new Date().toISOString();
+      // Preserve already-tracked notification timestamps in the next snapshot.
+      for (const msg of pending) {
+        nextNotifications[msg.message_id] = msg.notified_at || previousNotifications[msg.message_id] || '';
       }
+
+      // Only notify for messages that have never been successfully notified.
+      // Using a message-ID set prevents re-notification on every monitor poll
+      // (issue #116). A message is considered notified when either:
+      //   - notified_at is set in the mailbox file (persisted by markMessageNotified), or
+      //   - the message_id exists in previousNotifications from the last snapshot.
+      // Both checks use Boolean() so an empty-string value is treated as unnotified.
+      const unnotified = pending.filter(
+        (m) => !m.notified_at && !previousNotifications[m.message_id],
+      );
+      if (unnotified.length === 0) continue;
+      if (!worker.alive) continue;
+
+      for (const msg of unnotified) {
+        // Re-validate that the message is still unnotified inside the barrier,
+        // since an acknowledgement (send-side operation) could have raced and
+        // marked it delivered after the initial discovery.
+        const currentMailbox = await listMailboxMessages(teamName, worker.name, cwd);
+        const currentMsg = currentMailbox.find((m) => m.message_id === msg.message_id);
+        if (!currentMsg || currentMsg.delivered_at) {
+          // Message was acked after our discovery; skip it.
+          continue;
+        }
+        toDispatch.push({ workerName: worker.name, workerInfo, msg: currentMsg });
+      }
+    }
+  });
+
+  // Phase 2: Enqueue and notify outside the barrier to avoid holding the lock
+  // during slow operations like waitForDispatchReceipt.
+  for (const { workerName, workerInfo, msg } of toDispatch) {
+    const msgTyped = msg as { message_id: string };
+    const outcome = await dispatchPendingMailboxMessage({
+      teamName,
+      workerName,
+      workerInfo,
+      messageId: msgTyped.message_id,
+      config,
+      dispatchPolicy,
+      cwd,
+    });
+    if (outcome.ok) {
+      nextNotifications[msgTyped.message_id] = new Date().toISOString();
     }
   }
 
