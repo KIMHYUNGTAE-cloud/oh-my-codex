@@ -13,7 +13,7 @@ import { queueDirectMailboxMessage } from '../mcp-comm.js';
 import { readTeamConfig, readTeamManifestV2, saveTeamConfig } from '../state.js';
 import {
   enqueueDispatchRequest, initTeamState, listDispatchRequests, listMailboxMessages,
-  markDispatchRequestNotified, readDispatchRequest, removeDispatchRequestsForWorkers,
+  markDispatchRequestNotified, readDispatchRequest, readMonitorSnapshot, removeDispatchRequestsForWorkers,
   sendDirectMessage, teamEventLogPath, type TeamDispatchRequestInput,
 } from '../state.js';
 
@@ -464,62 +464,66 @@ it('skips notification after intervening acknowledgement in transport_direct', a
   }
 });
 
-it('retries delivery when dispatch request snapshot is unreadable/malformed', async t => {
-  const cwd = await fixture(t);
+it('does not mark message notified when dispatch snapshot is corrupted during finalization', async t => {
+  const { cwd } = await fixtureWithLiveWorkers(t);
+  
+  // Set up a team with transport_direct mode to test the direct notification path.
+  const config = await readTeamConfig('recovery', cwd);
+  assert.ok(config);
+  const manifestPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'manifest.v2.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as any;
+  manifest.policy = { ...(manifest.policy || {}), dispatch_mode: 'transport_direct' };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   
   // Disable the runtime bridge to ensure there's no authoritative fallback.
   // This forces readDispatchRequests to rely on the local shadow, so corruption causes real failure.
-  process.env.OMX_RUNTIME_BINARY = '/nonexistent';
+  process.env.OMX_RUNTIME_BRIDGE = '';
   t.after(() => {
-    delete process.env.OMX_RUNTIME_BINARY;
+    delete process.env.OMX_RUNTIME_BRIDGE;
   });
-  
-  const config = await readTeamConfig('recovery', cwd);
-  assert.ok(config);
   
   // Send an unnotified message.
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
-  assert.ok(!message.notified_at);
+  assert.ok(!message.notified_at, 'message should start unnotified');
   
-  // Manually enqueue a dispatch request for this message to test the snapshot read failure in finalization.
-  const queued = await enqueueDispatchRequest('recovery', {
-    kind: 'mailbox',
-    to_worker: 'worker-2',
-    worker_index: 1,
-    pane_id: config.workers[1]?.pane_id,
-    trigger_message: 'test-msg',
-    intent: 'pending-mailbox-review',
-    message_id: message.message_id,
-    transport_preference: 'hook_preferred_with_fallback',
-    fallback_allowed: true,
-  }, cwd);
-  const requestId = queued.request.request_id;
-  
-  // Verify the dispatch request was enqueued.
-  const requestBefore = await readDispatchRequest('recovery', requestId, cwd);
-  assert.ok(requestBefore, 'dispatch request should exist');
-  assert.equal(requestBefore.status, 'pending', 'request should be pending');
-  
-  // Corrupt the snapshot to make it unreadable.
-  const requestsPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'dispatch', 'requests.json');
-  const originalContent = await readFile(requestsPath, 'utf8');
-  await writeFile(requestsPath, '{invalid json');
+  // Use the hook to corrupt the dispatch snapshot after Phase 1.5 enqueue.
+  let hookInvoked = false;
+  let requestsPath = '';
+  let originalContent = '';
+  const { setMailboxDeliveryAfterPhase1HookForTest } = await import('../runtime.js');
+  setMailboxDeliveryAfterPhase1HookForTest(async (teamName: string, cwd: string) => {
+    hookInvoked = true;
+    // Corrupt the snapshot after Phase 1.5 enqueue but before Phase 2 finalization.
+    requestsPath = join(cwd, '.omx', 'state', 'team', teamName, 'dispatch', 'requests.json');
+    originalContent = await readFile(requestsPath, 'utf8');
+    await writeFile(requestsPath, '{invalid json');
+  });
   
   try {
-    // Try to read the corrupted snapshot.
-    // This should throw because we disabled the runtime bridge (no authoritative fallback).
-    await assert.rejects(
-      () => readDispatchRequest('recovery', requestId, cwd),
-      /SyntaxError|Unexpected|malformed/i,
-      'reading corrupted snapshot should throw'
-    );
+    // Call monitorTeam. The dispatch will be enqueued in Phase 1.5, but the finalization
+    // will see a corrupted snapshot and should return a retryable failure.
+    // This means the message should NOT be marked as notified.
+    const { monitorTeam } = await import('../runtime.js');
+    await monitorTeam('recovery', cwd);
+    assert.equal(hookInvoked, true, 'test hook should have been invoked');
+    
+    // Verify that the message is NOT marked as notified (snapshot corruption should prevent it).
+    const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
+    const msgAfter = mailbox.find(m => m.message_id === message.message_id);
+    assert.ok(!msgAfter?.notified_at, 'message should NOT be marked notified when dispatch snapshot is corrupted');
+    
+    // Verify that the monitor snapshot does not have a notification record for this message.
+    const snapshot = await readMonitorSnapshot('recovery', cwd);
+    assert.ok(snapshot, 'monitor snapshot should exist');
+    const hasNotificationRecord = message.message_id in snapshot.mailboxNotifiedByMessageId;
+    assert.ok(!hasNotificationRecord, 'monitor snapshot should not have notification record for corrupted dispatch');
   } finally {
-    // Restore the valid snapshot.
-    await writeFile(requestsPath, originalContent);
+    setMailboxDeliveryAfterPhase1HookForTest(null);
+    // Restore the snapshot for cleanup
+    if (originalContent && requestsPath) {
+      try {
+        await writeFile(requestsPath, originalContent);
+      } catch {}
+    }
   }
-  
-  // Verify that after restoring the snapshot, we can read the request again.
-  const requestAfter = await readDispatchRequest('recovery', requestId, cwd);
-  assert.ok(requestAfter, 'dispatch request should be readable after snapshot is restored');
-  assert.equal(requestAfter.request_id, requestId, 'should be the same request');
 });

@@ -6895,9 +6895,20 @@ async function finalizeDispatchedMailboxMessage(params: {
     return { ok: false, transport: 'mailbox', reason: 'dispatch_request_read_failed', request_id: requestId, message_id: messageId };
   }
   
-  if (currentRequest === null || currentRequest.status === 'delivered') {
-    // Message was already delivered by an intervening acknowledgement, or the request was not found.
-    // Skip notification.
+  if (currentRequest === null) {
+    // Request is missing from the snapshot. Check if the mailbox message was delivered externally.
+    const mailboxMessages = await listMailboxMessages(teamName, workerName, cwd);
+    const mailboxMsg = mailboxMessages.find(m => m.message_id === messageId);
+    if (!mailboxMsg?.delivered_at) {
+      // Message is not marked delivered in the mailbox either, so we need to retry.
+      return { ok: false, transport: 'mailbox', reason: 'dispatch_request_missing', request_id: requestId, message_id: messageId };
+    }
+    // Message was delivered externally, skip notification.
+    return { ok: true, transport: 'mailbox', reason: 'stale_after_acknowledgement', request_id: requestId, message_id: messageId };
+  }
+
+  if (currentRequest.status === 'delivered') {
+    // Message was already delivered by an intervening acknowledgement.
     return { ok: true, transport: 'mailbox', reason: 'stale_after_acknowledgement', request_id: requestId, message_id: messageId };
   }
 

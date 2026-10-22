@@ -809,8 +809,13 @@ function isTeamManifestV2(value: unknown): value is TeamManifestV2 {
 }
 
 // Atomic write: write to {path}.tmp.{pid}, fsync it, rename, then fsync parent.
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && typeof (error as any).code === 'string';
+}
+
 function isUnsupportedParentDirectorySyncError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
+  if (!isErrnoException(error)) return false;
+  const code = error.code;
   return (
     code === 'EINVAL'
     || code === 'ENOTSUP'
@@ -859,8 +864,8 @@ export async function writeAtomic(filePath: string, data: string): Promise<void>
     await renameForAtomicWrite(tmpPath, filePath);
     await syncParentDirectory(filePath);
   } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code === 'ENOENT' && existsSync(filePath)) {
+    if (!isErrnoException(error)) throw error;
+    if (error.code === 'ENOENT' && existsSync(filePath)) {
       try {
         const existing = await readFile(filePath, 'utf8');
         if (existing === data) return;
@@ -983,7 +988,7 @@ export async function recoverTeamMembershipTaskTransaction(
   try {
     journal = JSON.parse(await readFile(journalPath, 'utf8')) as MembershipTransactionJournal;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if (isErrnoException(error) && error.code === 'ENOENT') return;
     throw error;
   }
   if (journal.schemaVersion !== 1 || (journal.phase !== 'prepared' && journal.phase !== 'committed') || !Array.isArray(journal.files)) {
@@ -1568,8 +1573,8 @@ async function computeNextTaskIdFromDisk(teamName: string, cwd: string): Promise
       if (Number.isFinite(id) && id > maxId) maxId = id;
     }
   } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code === 'ENOENT') return 1;
+    if (!isErrnoException(error)) throw error;
+    if (error.code === 'ENOENT') return 1;
     throw error;
   }
 
@@ -1642,7 +1647,7 @@ export async function readWorkerHeartbeat(
     const parsed = JSON.parse(raw) as unknown;
     return isWorkerHeartbeat(parsed) ? parsed : null;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (isErrnoException(error) && error.code === 'ENOENT') return null;
     return null;
   }
 }
@@ -1672,7 +1677,7 @@ export async function readWorkerStatus(teamName: string, workerName: string, cwd
     }
     return parsed;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return unknownStatus;
+    if (isErrnoException(error) && error.code === 'ENOENT') return unknownStatus;
     return unknownStatus;
   }
 }
@@ -2049,7 +2054,7 @@ async function readLegacyMailbox(teamName: string, workerName: string, cwd: stri
     if (v.worker !== workerName || !Array.isArray(v.messages)) throw new Error(`Invalid team mailbox: ${p}`);
     return { worker: workerName, messages: v.messages as TeamMailboxMessage[] };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { worker: workerName, messages: [] };
+    if (isErrnoException(error) && error.code === 'ENOENT') return { worker: workerName, messages: [] };
     throw error;
   }
 }
@@ -2104,8 +2109,7 @@ export async function readDispatchRequests(
     }
   } catch (error: unknown) {
     // Capture non-ENOENT errors; we may throw them later if no authoritative state exists.
-    const nodeError = error as NodeJS.ErrnoException | undefined;
-    if (nodeError?.code !== 'ENOENT') {
+    if (!isErrnoException(error) || error.code !== 'ENOENT') {
       localReadError = error;
     }
     /* Missing legacy state (ENOENT) or captured error has no requests in local. */
@@ -2127,8 +2131,8 @@ export async function readDispatchRequests(
   const localById = new Map(local.map((request) => [request.request_id, request]));
   const receipts = new Map<string, Set<TeamDispatchRequestStatus>>();
   const journal = join(stateDir, 'team', teamName, 'dispatch', 'runtime-finalizations.jsonl');
-  const finalizations = await readFile(journal, 'utf8').catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return '';
+  const finalizations = await readFile(journal, 'utf8').catch((error: unknown) => {
+    if (isErrnoException(error) && error.code === 'ENOENT') return '';
     throw error;
   });
   for (const line of finalizations.split('\n').filter(Boolean)) {
@@ -2213,7 +2217,7 @@ async function readLegacyDispatchRequestsForRollback(teamName: string, cwd: stri
     }
     return raw as TeamDispatchRequest[];
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    if (isErrnoException(error) && error.code === 'ENOENT') return [];
     throw error;
   }
 }
@@ -2520,7 +2524,7 @@ export async function retireTeamMailboxMessages(
       if (WORKER_NAME_SAFE_PATTERN.test(workerName)) targets.add(workerName);
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!isErrnoException(error) || error.code !== 'ENOENT') throw error;
   }
   if (isBridgeEnabled()) {
     const stateDir = resolveBridgeStateDir(cwd);
@@ -2720,7 +2724,7 @@ export async function readShutdownAck(
     }
     return parsed;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (isErrnoException(error) && error.code === 'ENOENT') return null;
     return null;
   }
 }
