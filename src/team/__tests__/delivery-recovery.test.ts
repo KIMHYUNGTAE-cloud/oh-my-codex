@@ -465,7 +465,7 @@ it('skips notification after intervening acknowledgement in transport_direct', a
 });
 
 it('retries delivery when dispatch request snapshot is unreadable/malformed', async t => {
-  const { cwd } = await fixtureWithLiveWorkers(t);
+  const cwd = await fixture(t);
   
   // Send an unnotified message.
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
