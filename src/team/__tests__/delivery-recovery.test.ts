@@ -471,58 +471,76 @@ it('retries delivery when dispatch request snapshot is unreadable/malformed', as
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
   assert.ok(!message.notified_at);
   
-  // Manually enqueue a dispatch request for the message.
-  const queued = await enqueueDispatchRequest('recovery', {
-    kind: 'mailbox',
-    to_worker: 'worker-2',
-    worker_index: 1,
-    pane_id: 'pane-2',
-    trigger_message: 'mailbox-wake',
-    intent: 'pending-mailbox-review',
-    message_id: message.message_id,
-    transport_preference: 'hook_preferred_with_fallback',
-    fallback_allowed: true,
-  }, cwd);
-  const requestId = queued.request.request_id;
+  // Get the list of dispatch requests before monitor (should be empty).
+  const requestsBefore = await listDispatchRequests('recovery', cwd);
+  assert.equal(requestsBefore.filter(r => r.message_id === message.message_id).length, 0, 
+    'no dispatch requests should exist for this message yet');
   
-  // Verify the dispatch request is pending.
-  const requestBefore = await readDispatchRequest('recovery', requestId, cwd);
-  assert.equal(requestBefore?.status, 'pending');
-  
-  // Corrupt the dispatch request snapshot to make it unreadable.
+  // Prepare to corrupt the snapshot AFTER the enqueue read but BEFORE finalization.
   const requestsPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'dispatch', 'requests.json');
   const originalContent = await readFile(requestsPath, 'utf8');
-  await writeFile(requestsPath, '{invalid json');
+  let corrupted = false;
+  
+  // Use a hook to corrupt the snapshot after Phase 1.5 enqueue but before Phase 2 finalization.
+  const { setMailboxDeliveryAfterPhase1HookForTest } = await import('../runtime.js');
+  setMailboxDeliveryAfterPhase1HookForTest(async (teamName: string, cwd: string) => {
+    // Hook runs after Phase 1 discovery but before Phase 1.5 enqueue.
+    // Don't corrupt yet; let the enqueue happen first.
+  });
   
   try {
-    // Call monitorTeam with corrupted snapshot.
-    // The finalization should fail to read the request and return failure, not recording notification.
+    // First call to monitorTeam: discovers the message and enqueues a dispatch request.
+    // This read will succeed because the snapshot is still valid.
     await (await import('../runtime.js')).monitorTeam('recovery', cwd);
     
-    // Verify that the message was NOT marked as notified (notification timestamp not recorded).
+    // Verify that the dispatch request was created and is pending.
+    const requestsAfterEnqueue = await listDispatchRequests('recovery', cwd);
+    const createdRequest = requestsAfterEnqueue.find(r => r.message_id === message.message_id);
+    assert.ok(createdRequest, 'dispatch request should have been created');
+    const requestId = createdRequest.request_id;
+    assert.equal(createdRequest.status, 'pending', 'newly enqueued request should be pending');
+    
+    // Now corrupt the snapshot for the second monitor call (finalization phase).
+    await writeFile(requestsPath, '{invalid json');
+    corrupted = true;
+    
+    // Second call to monitorTeam: should attempt finalization but fail due to corrupted snapshot.
+    // The finalization should return failure, not recording notification.
+    await (await import('../runtime.js')).monitorTeam('recovery', cwd);
+    
+    // Verify that the message was NOT marked as notified.
     // This is the key regression test: a read failure should NOT mark the message as notified.
-    const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
-    const msgAfterFailedRead = mailbox.find(m => m.message_id === message.message_id);
-    assert.ok(!msgAfterFailedRead?.notified_at, 'message should NOT be marked as notified after read failure');
+    const mailboxAfterFailedFinalization = await listMailboxMessages('recovery', 'worker-2', cwd);
+    const msgAfterFailedRead = mailboxAfterFailedFinalization.find(m => m.message_id === message.message_id);
+    assert.ok(!msgAfterFailedRead?.notified_at, 
+      'message should NOT be marked as notified after finalization read failure');
+    
+    // Verify that the request is still pending (not marked as notified due to failure).
+    const requestAfterFailedFinalization = await readDispatchRequest('recovery', requestId, cwd);
+    assert.equal(requestAfterFailedFinalization?.status, 'pending',
+      'request should still be pending after failed finalization');
   } finally {
     // Restore the valid snapshot.
-    await writeFile(requestsPath, originalContent);
+    if (corrupted) {
+      await writeFile(requestsPath, originalContent);
+    }
+    setMailboxDeliveryAfterPhase1HookForTest(null);
   }
   
-  // Now fix the corruption and retry.
-  // Call monitorTeam again.
+  // Third call to monitorTeam: now that the snapshot is fixed, finalization should succeed.
   await (await import('../runtime.js')).monitorTeam('recovery', cwd);
   
   // Verify that the request is now handled correctly.
-  // The finalization should succeed and the message should be marked as notified.
-  const requestAfter = await readDispatchRequest('recovery', requestId, cwd);
-  // The request should be either notified or delivered.
+  const requestsAfterRecovery = await listDispatchRequests('recovery', cwd);
+  const recoveredRequest = requestsAfterRecovery.find(r => r.message_id === message.message_id);
+  assert.ok(recoveredRequest, 'request should still exist');
   assert.ok(
-    requestAfter?.status === 'notified' || requestAfter?.status === 'delivered',
-    `request status should be 'notified' or 'delivered', got '${requestAfter?.status}'`
+    recoveredRequest.status === 'notified' || recoveredRequest.status === 'delivered',
+    `request status should be 'notified' or 'delivered' after recovery, got '${recoveredRequest.status}'`
   );
   
-  const mailboxAfter = await listMailboxMessages('recovery', 'worker-2', cwd);
-  const msgAfter = mailboxAfter.find(m => m.message_id === message.message_id);
+  // Verify that the message is now marked as notified.
+  const mailboxAfterRecovery = await listMailboxMessages('recovery', 'worker-2', cwd);
+  const msgAfter = mailboxAfterRecovery.find(m => m.message_id === message.message_id);
   assert.ok(msgAfter?.notified_at, 'message should be marked as notified after recovery');
 });
