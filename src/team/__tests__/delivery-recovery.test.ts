@@ -463,3 +463,66 @@ it('skips notification after intervening acknowledgement in transport_direct', a
     setMailboxDeliveryAfterPhase1HookForTest(null);
   }
 });
+
+it('retries delivery when dispatch request snapshot is unreadable/malformed', async t => {
+  const { cwd, workers } = await fixtureWithLiveWorkers(t);
+  
+  // Send an unnotified message.
+  const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
+  assert.ok(!message.notified_at);
+  
+  // Manually enqueue a dispatch request for the message.
+  const queued = await enqueueDispatchRequest('recovery', {
+    kind: 'mailbox',
+    to_worker: 'worker-2',
+    worker_index: 1,
+    pane_id: 'pane-2',
+    trigger_message: 'mailbox-wake',
+    intent: 'pending-mailbox-review',
+    message_id: message.message_id,
+    transport_preference: 'hook_preferred_with_fallback',
+    fallback_allowed: true,
+  }, cwd);
+  const requestId = queued.request.request_id;
+  
+  // Verify the dispatch request is pending.
+  const requestBefore = await readDispatchRequest('recovery', requestId, cwd);
+  assert.equal(requestBefore?.status, 'pending');
+  
+  // Corrupt the dispatch request snapshot to make it unreadable.
+  const requestsPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'dispatch', 'requests.json');
+  const originalContent = await readFile(requestsPath, 'utf8');
+  await writeFile(requestsPath, '{invalid json');
+  
+  try {
+    // Call monitorTeam with corrupted snapshot.
+    // The finalization should fail to read the request and return failure, not recording notification.
+    await (await import('../runtime.js')).monitorTeam('recovery', cwd);
+    
+    // Verify that the message was NOT marked as notified (notification timestamp not recorded).
+    // This is the key regression test: a read failure should NOT mark the message as notified.
+    const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
+    const msgAfterFailedRead = mailbox.find(m => m.message_id === message.message_id);
+    assert.ok(!msgAfterFailedRead?.notified_at, 'message should NOT be marked as notified after read failure');
+  } finally {
+    // Restore the valid snapshot.
+    await writeFile(requestsPath, originalContent);
+  }
+  
+  // Now fix the corruption and retry.
+  // Call monitorTeam again.
+  await (await import('../runtime.js')).monitorTeam('recovery', cwd);
+  
+  // Verify that the request is now handled correctly.
+  // The finalization should succeed and the message should be marked as notified.
+  const requestAfter = await readDispatchRequest('recovery', requestId, cwd);
+  // The request should be either notified or delivered.
+  assert.ok(
+    requestAfter?.status === 'notified' || requestAfter?.status === 'delivered',
+    `request status should be 'notified' or 'delivered', got '${requestAfter?.status}'`
+  );
+  
+  const mailboxAfter = await listMailboxMessages('recovery', 'worker-2', cwd);
+  const msgAfter = mailboxAfter.find(m => m.message_id === message.message_id);
+  assert.ok(msgAfter?.notified_at, 'message should be marked as notified after recovery');
+});

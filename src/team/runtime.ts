@@ -6691,13 +6691,18 @@ async function deliverPendingMailboxMessages(
   const enqueuedRequests: Array<{ workerName: string; workerInfo: WorkerInfo; messageId: string; requestId: string }> = [];
 
   // Phase 1+1.5: Identify, re-validate, and enqueue unnotified messages inside the barrier.
+  // The structure is: Phase 1 discovery → test hook → Phase 1.5 re-validation/enqueue
+  // This ensures the hook runs after initial discovery but before the final validation step.
   await withTeamTaskMembershipBarrier(teamName, cwd, async () => {
-    // Test hook: allow injecting operations between Phase 1 (discovery) and Phase 1.5 (enqueue).
-    // This enables testing that the Phase 1.5 re-validation prevents stale enqueues.
-    const hook = mailboxDeliveryAfterPhase1HookForTest;
-    if (hook) {
-      await hook(teamName, cwd);
-    }
+    // Phase 1: Discover pending messages across all workers.
+    type DiscoveredWorkerData = {
+      worker: typeof workers[number];
+      workerInfo: WorkerInfo;
+      pending: Awaited<ReturnType<typeof listMailboxMessages>>;
+      unnotified: Awaited<ReturnType<typeof listMailboxMessages>>;
+    };
+    const discoveredByWorker = new Map<string, DiscoveredWorkerData>();
+    
     for (const worker of workers) {
       const workerInfo = config.workers.find((w) => w.name === worker.name);
       if (!workerInfo) continue;
@@ -6725,10 +6730,23 @@ async function deliverPendingMailboxMessages(
       if (unnotified.length === 0) continue;
       if (!worker.alive) continue;
 
+      discoveredByWorker.set(worker.name, { worker, workerInfo, pending, unnotified });
+    }
+    
+    // Test hook: allow injecting operations between Phase 1 (discovery) and Phase 1.5 (re-validation/enqueue).
+    // This enables testing that the Phase 1.5 re-validation prevents stale enqueues.
+    const hook = mailboxDeliveryAfterPhase1HookForTest;
+    if (hook) {
+      await hook(teamName, cwd);
+    }
+    
+    // Phase 1.5: Re-validate and enqueue unnotified messages.
+    // Must run after the test hook so we can detect changes (e.g., marks-as-delivered) from the hook.
+    for (const { worker, workerInfo, unnotified } of discoveredByWorker.values()) {
       for (const msg of unnotified) {
         // Re-validate that the message is still unnotified inside the barrier,
         // since an acknowledgement (send-side operation) could have raced and
-        // marked it delivered after the initial discovery.
+        // marked it delivered after the initial discovery, or the test hook could have changed state.
         const currentMailbox = await listMailboxMessages(teamName, worker.name, cwd);
         const currentMsg = currentMailbox.find((m) => m.message_id === msg.message_id);
         if (!currentMsg || currentMsg.delivered_at) {
@@ -6736,8 +6754,7 @@ async function deliverPendingMailboxMessages(
           continue;
         }
         
-        // Phase 1.5: Enqueue the dispatch request inside the barrier.
-        // Re-check one final time that the message is still undelivered,
+        // Phase 1.5 final check: Re-validate one final time that the message is still undelivered,
         // since an ack could land between the previous check and this enqueue.
         const preEnqueueMailbox = await listMailboxMessages(teamName, worker.name, cwd);
         const preEnqueueMsg = preEnqueueMailbox.find((m) => m.message_id === currentMsg.message_id);
@@ -6869,9 +6886,18 @@ async function finalizeDispatchedMailboxMessage(params: {
   // Re-read the dispatch request to check if it was delivered after Phase 1.5 enqueue.
   // An acknowledgement in prompt mode or transport_direct can land immediately after Phase 1.5
   // and mark the request delivered before this finalization runs.
-  const currentRequest = await readDispatchRequest(teamName, requestId, cwd).catch(() => null);
-  if (!currentRequest || currentRequest.status === 'delivered') {
-    // Message was already delivered by an intervening acknowledgement; skip notification.
+  let currentRequest;
+  try {
+    currentRequest = await readDispatchRequest(teamName, requestId, cwd);
+  } catch (e) {
+    // Dispatch snapshot is unreadable/malformed; return failure so the message can be retried.
+    // Do not mark as notified, so the next monitor pass will attempt delivery again.
+    return { ok: false, transport: 'mailbox', reason: 'dispatch_request_read_failed', request_id: requestId, message_id: messageId };
+  }
+  
+  if (currentRequest === null || currentRequest.status === 'delivered') {
+    // Message was already delivered by an intervening acknowledgement, or the request was not found.
+    // Skip notification.
     return { ok: true, transport: 'mailbox', reason: 'stale_after_acknowledgement', request_id: requestId, message_id: messageId };
   }
 
