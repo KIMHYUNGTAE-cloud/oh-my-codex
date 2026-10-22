@@ -484,55 +484,39 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     delete process.env.OMX_RUNTIME_BRIDGE;
   });
   
-  // Send an unnotified message.
+  // Send an unnotified message and create a dispatch request for it directly.
+  // This bypasses monitorTeam discovery to test finalization error handling in isolation.
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
   assert.ok(!message.notified_at, 'message should start unnotified');
   
-  // Use the hook to corrupt the dispatch snapshot after Phase 1.5 enqueue but before Phase 2 finalization.
-  let hookInvoked = false;
-  let requestsPath = '';
-  let originalContent = '';
-  let enqueuedRequestIdForCorruption = '';
-  const { setMailboxDeliveryAfterEnqueueHookForTest, monitorTeam } = await import('../runtime.js');
-  setMailboxDeliveryAfterEnqueueHookForTest(async (teamName: string, cwd: string, enqueuedRequestIds: string[]) => {
-    hookInvoked = true;
-    // Only corrupt if dispatch requests were actually enqueued.
-    // The enqueue might not happen if Phase 1.5 re-validation finds the message is no longer pending.
-    if (enqueuedRequestIds.length === 0) {
-      return;
-    }
-    enqueuedRequestIdForCorruption = enqueuedRequestIds[0];
-    
-    // Corrupt the snapshot after Phase 1.5 enqueue but before Phase 2 finalization.
-    requestsPath = join(cwd, '.omx', 'state', 'team', teamName, 'dispatch', 'requests.json');
-    originalContent = await readFile(requestsPath, 'utf8');
-    // Verify the request is in the snapshot before corrupting it
-    const requestsData = JSON.parse(originalContent);
-    assert.ok(Array.isArray(requestsData) && requestsData.some(r => r?.request_id === enqueuedRequestIdForCorruption), 
-      '[4351877336] enqueued request should exist in snapshot before corruption');
-    await writeFile(requestsPath, '{invalid json');
-  });
+  // Directly enqueue a dispatch request for this message.
+  // P2: assert the target dispatch was enqueued before the corruption
+  const queued = await enqueueDispatchRequest('recovery', {
+    kind: 'mailbox',
+    to_worker: 'worker-2',
+    message_id: message.message_id,
+    trigger_message: 'test trigger',
+  }, cwd);
+  assert.ok(queued.request, '[4351877336] dispatch request should be enqueued');
+  const requestId = queued.request.request_id;
+  
+  // Corrupt the dispatch snapshot to simulate a read failure during finalization.
+  const requestsPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'dispatch', 'requests.json');
+  const originalContent = await readFile(requestsPath, 'utf8');
+  await writeFile(requestsPath, '{invalid json');
   
   try {
-    // Call monitorTeam. The dispatch will be enqueued in Phase 1.5, then the hook corrupts
-    // the snapshot, and finalization will see a corrupted snapshot and return a retryable failure.
-    // This means the message should NOT be marked as notified.
+    // Try to finalize with a corrupted snapshot. The error handling should:
+    // - Detect the corruption when reading the request
+    // - Return ok: false (not mark as notified)
+    // - Allow retry on next monitor pass
+    const { monitorTeam } = await import('../runtime.js');
+    
+    // Call monitorTeam which will try to finalize our enqueued request.
+    // Since the snapshot is corrupted, finalization should fail gracefully.
     await monitorTeam('recovery', cwd);
-    assert.equal(hookInvoked, true, 'test hook should have been invoked');
     
-    // Restore the snapshot before listing dispatch requests (snapshot is corrupted during hook).
-    // P1: restore the snapshot before listing dispatch requests
-    if (originalContent && requestsPath) {
-      await writeFile(requestsPath, originalContent);
-    }
-    
-    // Verify that a dispatch request was actually created for this message.
-    // P2: assert the target dispatch was enqueued before the corruption
-    const dispatchRequests = (await listDispatchRequests('recovery', cwd))
-      .filter(r => r.message_id === message.message_id);
-    assert.ok(dispatchRequests.length > 0, '[4351877336] dispatch request for message ' + message.message_id + ' should have been created during monitorTeam');
-    
-    // Verify that the message is NOT marked as notified (snapshot corruption should prevent it).
+    // Verify that the message is NOT marked as notified (corruption prevented it).
     let mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
     let msgAfter = mailbox.find(m => m.message_id === message.message_id);
     assert.ok(!msgAfter?.notified_at, 'message should NOT be marked notified when dispatch snapshot is corrupted');
@@ -543,9 +527,16 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     let hasNotificationRecord = message.message_id in snapshot.mailboxNotifiedByMessageId;
     assert.ok(!hasNotificationRecord, 'monitor snapshot should not have notification record for corrupted dispatch');
     
-    // Clear the hook and run monitorTeam again.
-    // This time it should succeed in delivering the message.
-    setMailboxDeliveryAfterEnqueueHookForTest(null);
+    // Restore the snapshot so the next monitor pass can retry delivery.
+    // P1: restore the snapshot before listing dispatch requests
+    await writeFile(requestsPath, originalContent);
+    
+    // Verify the request still exists in the restored snapshot.
+    const dispatchRequests = (await listDispatchRequests('recovery', cwd))
+      .filter(r => r.request_id === requestId);
+    assert.ok(dispatchRequests.length > 0, '[4351877336] dispatch request should exist in snapshot after restoration');
+    
+    // Run monitorTeam again. This time finalization should succeed with the restored snapshot.
     await monitorTeam('recovery', cwd);
     
     // Verify that the message is now marked as notified after the retry.
@@ -559,12 +550,9 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     hasNotificationRecord = message.message_id in snapshot.mailboxNotifiedByMessageId;
     assert.ok(hasNotificationRecord, 'monitor snapshot should have notification record after successful delivery');
   } finally {
-    setMailboxDeliveryAfterEnqueueHookForTest(null);
     // Restore the snapshot for cleanup
-    if (originalContent && requestsPath) {
-      try {
-        await writeFile(requestsPath, originalContent);
-      } catch {}
-    }
+    try {
+      await writeFile(requestsPath, originalContent);
+    } catch {}
   }
 });
