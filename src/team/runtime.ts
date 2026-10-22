@@ -501,6 +501,14 @@ export function setTerminalEpochStartedHookForTest(
   terminalEpochStartedHookForTest = hook;
 }
 
+let mailboxDeliveryAfterPhase1HookForTest: ((teamName: string, cwd: string) => void | Promise<void>) | null = null;
+
+export function setMailboxDeliveryAfterPhase1HookForTest(
+  hook: ((teamName: string, cwd: string) => void | Promise<void>) | null,
+): void {
+  mailboxDeliveryAfterPhase1HookForTest = hook;
+}
+
 
 export function applyCreatedInteractiveSessionToConfig(
   config: TeamConfig,
@@ -6679,11 +6687,10 @@ async function deliverPendingMailboxMessages(
 ): Promise<Record<string, string>> {
   const nextNotifications: Record<string, string> = {};
   const pendingIdsAcrossTeam = new Set<string>();
-  // Collect the unnotified messages to enqueue, protected by the barrier.
-  // This list is computed while holding the lock, then enqueued and notified outside it.
-  const toDispatch: Array<{ workerName: string; workerInfo: WorkerInfo; msg: unknown }> = [];
+  // Collect enqueued requests: request ID => { workerName, workerInfo, messageId }
+  const enqueuedRequests: Array<{ workerName: string; workerInfo: WorkerInfo; messageId: string; requestId: string }> = [];
 
-  // Phase 1: Identify unnotified messages inside the barrier.
+  // Phase 1+1.5: Identify, re-validate, and enqueue unnotified messages inside the barrier.
   await withTeamTaskMembershipBarrier(teamName, cwd, async () => {
     for (const worker of workers) {
       const workerInfo = config.workers.find((w) => w.name === worker.name);
@@ -6722,26 +6729,70 @@ async function deliverPendingMailboxMessages(
           // Message was acked after our discovery; skip it.
           continue;
         }
-        toDispatch.push({ workerName: worker.name, workerInfo, msg: currentMsg });
+        
+        // Phase 1.5: Enqueue the dispatch request inside the barrier.
+        // Re-check one final time that the message is still undelivered,
+        // since an ack could land between the previous check and this enqueue.
+        const preEnqueueMailbox = await listMailboxMessages(teamName, worker.name, cwd);
+        const preEnqueueMsg = preEnqueueMailbox.find((m) => m.message_id === currentMsg.message_id);
+        if (!preEnqueueMsg || preEnqueueMsg.delivered_at) {
+          // Message was acked; skip enqueue.
+          continue;
+        }
+        
+        const triggerDirective = buildMailboxTriggerDirective(
+          worker.name,
+          teamName,
+          1,
+          resolveInstructionStateRoot(workerInfo.worktree_path),
+        );
+        const transportPreference = resolveWorkerMailboxTransportPreference(config, dispatchPolicy);
+        const queued = await enqueueDispatchRequest(
+          teamName,
+          {
+            kind: 'mailbox',
+            to_worker: worker.name,
+            worker_index: workerInfo.index,
+            pane_id: workerInfo.pane_id,
+            trigger_message: triggerDirective.text,
+            intent: triggerDirective.intent,
+            message_id: currentMsg.message_id,
+            transport_preference: transportPreference,
+            fallback_allowed: transportPreference === 'hook_preferred_with_fallback',
+          },
+          cwd,
+        );
+        enqueuedRequests.push({
+          workerName: worker.name,
+          workerInfo,
+          messageId: currentMsg.message_id,
+          requestId: queued.request.request_id,
+        });
       }
     }
   });
+  
+  // Test hook: allow injecting operations between Phase 1 and Phase 2
+  const hook = mailboxDeliveryAfterPhase1HookForTest;
+  if (hook) {
+    await hook(teamName, cwd);
+  }
 
-  // Phase 2: Enqueue and notify outside the barrier to avoid holding the lock
+  // Phase 2: Finalize and notify outside the barrier to avoid holding the lock
   // during slow operations like waitForDispatchReceipt.
-  for (const { workerName, workerInfo, msg } of toDispatch) {
-    const msgTyped = msg as { message_id: string };
-    const outcome = await dispatchPendingMailboxMessage({
+  for (const { workerName, workerInfo, messageId, requestId } of enqueuedRequests) {
+    const outcome = await finalizeDispatchedMailboxMessage({
       teamName,
       workerName,
       workerInfo,
-      messageId: msgTyped.message_id,
+      messageId,
+      requestId,
       config,
       dispatchPolicy,
       cwd,
     });
     if (outcome.ok) {
-      nextNotifications[msgTyped.message_id] = new Date().toISOString();
+      nextNotifications[messageId] = new Date().toISOString();
     }
   }
 
@@ -6773,16 +6824,17 @@ function isExistingMailboxNotificationOutcome(outcome: DispatchOutcome): boolean
   return outcome.ok && outcome.reason === 'existing_message_already_notified';
 }
 
-async function dispatchPendingMailboxMessage(params: {
+async function finalizeDispatchedMailboxMessage(params: {
   teamName: string;
   workerName: string;
   workerInfo: WorkerInfo;
   messageId: string;
+  requestId: string;
   config: TeamConfig;
   dispatchPolicy: TeamPolicy;
   cwd: string;
 }): Promise<DispatchOutcome> {
-  const { teamName, workerName, workerInfo, messageId, config, dispatchPolicy, cwd } = params;
+  const { teamName, workerName, workerInfo, messageId, requestId, config, dispatchPolicy, cwd } = params;
   const triggerDirective = buildMailboxTriggerDirective(
     workerName,
     teamName,
@@ -6790,21 +6842,6 @@ async function dispatchPendingMailboxMessage(params: {
     resolveInstructionStateRoot(workerInfo.worktree_path),
   );
   const transportPreference = resolveWorkerMailboxTransportPreference(config, dispatchPolicy);
-  const queued = await enqueueDispatchRequest(
-    teamName,
-    {
-      kind: 'mailbox',
-      to_worker: workerName,
-      worker_index: workerInfo.index,
-      pane_id: workerInfo.pane_id,
-      trigger_message: triggerDirective.text,
-      intent: triggerDirective.intent,
-      message_id: messageId,
-      transport_preference: transportPreference,
-      fallback_allowed: transportPreference === 'hook_preferred_with_fallback',
-    },
-    cwd,
-  );
 
   if (transportPreference === 'hook_preferred_with_fallback') {
     return await finalizeQueuedMailboxDispatch({
@@ -6812,7 +6849,7 @@ async function dispatchPendingMailboxMessage(params: {
         ok: true,
         transport: 'hook',
         reason: 'queued_for_hook_dispatch',
-        request_id: queued.request.request_id,
+        request_id: requestId,
         message_id: messageId,
       },
       transportPreference,
@@ -6830,12 +6867,12 @@ async function dispatchPendingMailboxMessage(params: {
   }
 
   const direct = await notifyWorkerOutcome(config, workerInfo.index, triggerDirective.text, workerInfo.pane_id);
-  const outcome: DispatchOutcome = { ...direct, request_id: queued.request.request_id, message_id: messageId };
+  const outcome: DispatchOutcome = { ...direct, request_id: requestId, message_id: messageId };
   if (outcome.ok) {
     await markMessageNotified(teamName, workerName, messageId, cwd).catch(() => false);
     await markDispatchRequestNotified(
       teamName,
-      queued.request.request_id,
+      requestId,
       { message_id: messageId, last_reason: outcome.reason },
       cwd,
     ).catch(() => null);
@@ -6844,12 +6881,13 @@ async function dispatchPendingMailboxMessage(params: {
     cwd,
     teamName,
     workerName,
-    requestId: queued.request.request_id,
+    requestId,
     messageId,
     outcome,
   });
   return outcome;
 }
+
 
 async function finalizeQueuedMailboxDispatch(params: {
   queuedOutcome: DispatchOutcome;

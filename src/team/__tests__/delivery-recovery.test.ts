@@ -335,3 +335,45 @@ it('does not enqueue stale wakes when monitor and acknowledgement race', async t
   assert.equal(active.length, 1);
   assert.equal(active[0]?.message_id, second.message_id);
 });
+
+it('enqueue inside barrier after final re-validation prevents stale wakes', async t => {
+  const cwd = await fixture(t);
+  // Set up a scenario where an ack lands between Phase 1 discovery and Phase 1.5 enqueue.
+  // Send an unnotified message.
+  const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'unnotified', cwd);
+  assert.ok(!message.notified_at);
+  
+  // Use the test hook to inject an ack after Phase 1 (discovery) completes.
+  // This simulates an ack arriving between Phase 1 and Phase 1.5.
+  let hookInvoked = false;
+  const { setMailboxDeliveryAfterPhase1HookForTest } = await import('../runtime.js');
+  setMailboxDeliveryAfterPhase1HookForTest(async (teamName: string, cwd: string) => {
+    hookInvoked = true;
+    // Simulate ack landing after Phase 1 discovery, before Phase 1.5 enqueue.
+    await executeTeamApiOperation('mailbox-mark-delivered', {
+      team_name: teamName,
+      worker: 'worker-2',
+      message_id: message.message_id,
+    }, cwd);
+  });
+  
+  try {
+    // Call monitorTeam to trigger Phase 1 discovery and Phase 1.5 enqueue with re-validation.
+    await (await import('../runtime.js')).monitorTeam('recovery', cwd);
+    assert.equal(hookInvoked, true, 'test hook should have been invoked');
+    
+    // Verify that no new dispatch was enqueued (Phase 1.5 re-validation prevented it).
+    // The message should still be marked as delivered by the hook's ack.
+    const mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
+    const msgAfterMonitor = mailbox.find(m => m.message_id === message.message_id);
+    assert.ok(msgAfterMonitor?.delivered_at, 'message should have delivered_at set after hook ack');
+    
+    // Verify no pending dispatch requests were created for this message.
+    const dispatchRequests = (await listDispatchRequests('recovery', cwd))
+      .filter(r => r.message_id === message.message_id && (r.status === 'pending' || r.status === 'notified'));
+    assert.equal(dispatchRequests.length, 0, 'Phase 1.5 re-validation should have prevented enqueue of delivered message');
+  } finally {
+    // Clean up: clear the test hook.
+    setMailboxDeliveryAfterPhase1HookForTest(null);
+  }
+});
