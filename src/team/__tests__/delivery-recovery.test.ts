@@ -467,18 +467,25 @@ it('skips notification after intervening acknowledgement in transport_direct', a
 it('retries delivery when dispatch request snapshot is unreadable/malformed', async t => {
   const { cwd } = await fixtureWithLiveWorkers(t);
   
+  // Switch to transport_direct mode to avoid prompt handle complications.
+  // This lets us test the snapshot read failure in finalization without needing registered handles.
+  const config = await readTeamConfig('recovery', cwd);
+  assert.ok(config);
+  const manifestPath = join(cwd, '.omx', 'state', 'team', 'recovery', 'manifest.v2.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as any;
+  manifest.policy = { ...(manifest.policy || {}), dispatch_mode: 'transport_direct' };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  
   // Send an unnotified message.
   const message = await sendDirectMessage('recovery', 'worker-1', 'worker-2', 'test-msg', cwd);
   assert.ok(!message.notified_at);
   
   // Get worker config to match pane_id in the request.
-  const config = await readTeamConfig('recovery', cwd);
-  assert.ok(config);
   const worker2Info = config.workers.find(w => w.name === 'worker-2');
   assert.ok(worker2Info, 'worker-2 should exist in config');
   
   // First monitorTeam call: discovers the message and enqueues a dispatch request.
-  // In this live-worker fixture (prompt mode), this will enqueue the request for delivery.
+  // With transport_direct, finalization will attempt direct notification without prompts.
   await (await import('../runtime.js')).monitorTeam('recovery', cwd);
   
   // Verify that the dispatch request was created.
