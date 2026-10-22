@@ -2095,6 +2095,7 @@ export async function readDispatchRequests(
   const nowIso = new Date().toISOString();
   const path = dispatchRequestsPath(teamName, cwd, stateDir);
   let local: TeamDispatchRequest[] = [];
+  let localReadError: unknown = null;
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
     if (Array.isArray(parsed)) {
@@ -2102,15 +2103,23 @@ export async function readDispatchRequests(
         .filter((entry): entry is TeamDispatchRequest => entry !== null);
     }
   } catch (error: unknown) {
-    // Only suppress ENOENT (file doesn't exist); other errors (malformed JSON, permission denied, etc.) propagate as failures.
+    // Capture non-ENOENT errors; we may throw them later if no authoritative state exists.
     const nodeError = error as NodeJS.ErrnoException | undefined;
     if (nodeError?.code !== 'ENOENT') {
-      throw error;
+      localReadError = error;
     }
-    /* Missing legacy state has no requests. */
+    /* Missing legacy state (ENOENT) or captured error has no requests in local. */
   }
-  if (!isBridgeEnabled()) return local;
-  if (!hasRuntimeAuthority(stateDir)) return local;
+  if (!isBridgeEnabled()) {
+    // If bridge is disabled and local read failed, that's an unrecoverable error.
+    if (localReadError) throw localReadError;
+    return local;
+  }
+  if (!hasRuntimeAuthority(stateDir)) {
+    // If we have no runtime authority and local read failed, that's unrecoverable.
+    if (localReadError) throw localReadError;
+    return local;
+  }
   const records = authoritativeRecords ?? getDefaultBridge(stateDir).readCompatFile<{ records?: DispatchRecord[] }>('dispatch.json')?.records;
   const authoritative = (Array.isArray(records) && records.every(isStrictDispatchRecord) ? records : [])
     .map((record) => normalizeBridgeDispatchRecord(teamName, record, nowIso))
