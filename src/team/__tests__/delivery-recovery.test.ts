@@ -494,8 +494,10 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
   const queued = await enqueueDispatchRequest('recovery', {
     kind: 'mailbox',
     to_worker: 'worker-2',
+    worker_index: 2,
     message_id: message.message_id,
     trigger_message: 'test trigger',
+    intent: 'pending-mailbox-review',
   }, cwd);
   assert.ok(queued.request, '[4351877336] dispatch request should be enqueued');
   const requestId = queued.request.request_id;
