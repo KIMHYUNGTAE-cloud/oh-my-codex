@@ -492,21 +492,21 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
   let hookInvoked = false;
   let requestsPath = '';
   let originalContent = '';
-  let enqueuredRequestId = '';
+  let enqueuedRequestIdForCorruption = '';
   const { setMailboxDeliveryAfterEnqueueHookForTest, monitorTeam } = await import('../runtime.js');
   setMailboxDeliveryAfterEnqueueHookForTest(async (teamName: string, cwd: string, enqueuedRequestIds: string[]) => {
     hookInvoked = true;
     // Verify that at least one dispatch request was enqueued before we corrupt it.
     // P2: assert the target dispatch was enqueued before the corruption
     assert.ok(enqueuedRequestIds.length > 0, '[4351877336] target dispatch request should be enqueued before corruption');
-    enqueuredRequestId = enqueuedRequestIds[0];
+    enqueuedRequestIdForCorruption = enqueuedRequestIds[0];
     
     // Corrupt the snapshot after Phase 1.5 enqueue but before Phase 2 finalization.
     requestsPath = join(cwd, '.omx', 'state', 'team', teamName, 'dispatch', 'requests.json');
     originalContent = await readFile(requestsPath, 'utf8');
     // Verify the request is in the snapshot before corrupting it
     const requestsData = JSON.parse(originalContent);
-    assert.ok(Array.isArray(requestsData) && requestsData.some(r => r?.request_id === enqueuredRequestId), 
+    assert.ok(Array.isArray(requestsData) && requestsData.some(r => r?.request_id === enqueuedRequestIdForCorruption), 
       '[4351877336] enqueued request should exist in snapshot before corruption');
     await writeFile(requestsPath, '{invalid json');
   });
@@ -517,6 +517,12 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     // This means the message should NOT be marked as notified.
     await monitorTeam('recovery', cwd);
     assert.equal(hookInvoked, true, 'test hook should have been invoked');
+    
+    // Verify that a dispatch request was actually created for this message.
+    // P2: assert the target dispatch was enqueued before the corruption
+    const dispatchRequests = (await listDispatchRequests('recovery', cwd))
+      .filter(r => r.message_id === message.message_id);
+    assert.ok(dispatchRequests.length > 0, '[4351877336] dispatch request should have been created for the message');
     
     // Verify that the message is NOT marked as notified (snapshot corruption should prevent it).
     let mailbox = await listMailboxMessages('recovery', 'worker-2', cwd);
