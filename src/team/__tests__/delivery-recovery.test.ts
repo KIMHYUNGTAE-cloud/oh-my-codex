@@ -518,6 +518,12 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     await monitorTeam('recovery', cwd);
     assert.equal(hookInvoked, true, 'test hook should have been invoked');
     
+    // Restore the snapshot before listing dispatch requests (snapshot is corrupted during hook).
+    // P1: restore the snapshot before listing dispatch requests
+    if (originalContent && requestsPath) {
+      await writeFile(requestsPath, originalContent);
+    }
+    
     // Verify that a dispatch request was actually created for this message.
     // P2: assert the target dispatch was enqueued before the corruption
     const dispatchRequests = (await listDispatchRequests('recovery', cwd))
@@ -534,11 +540,6 @@ it('does not mark message notified when dispatch snapshot is corrupted during fi
     assert.ok(snapshot, 'monitor snapshot should exist');
     let hasNotificationRecord = message.message_id in snapshot.mailboxNotifiedByMessageId;
     assert.ok(!hasNotificationRecord, 'monitor snapshot should not have notification record for corrupted dispatch');
-    
-    // Restore the snapshot so the next monitor pass can retry delivery.
-    if (originalContent && requestsPath) {
-      await writeFile(requestsPath, originalContent);
-    }
     
     // Clear the hook and run monitorTeam again.
     // This time it should succeed in delivering the message.
