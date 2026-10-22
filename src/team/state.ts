@@ -2101,7 +2101,13 @@ export async function readDispatchRequests(
       local = parsed.map((entry) => normalizeDispatchRequestImpl(teamName, entry ?? {}, nowIso))
         .filter((entry): entry is TeamDispatchRequest => entry !== null);
     }
-  } catch { /* Missing legacy state has no requests. */ }
+  } catch (error: unknown) {
+    // Only suppress ENOENT (file doesn't exist); other errors (malformed JSON, permission denied, etc.) propagate as failures.
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      throw error;
+    }
+    /* Missing legacy state has no requests. */
+  }
   if (!isBridgeEnabled()) return local;
   if (!hasRuntimeAuthority(stateDir)) return local;
   const records = authoritativeRecords ?? getDefaultBridge(stateDir).readCompatFile<{ records?: DispatchRecord[] }>('dispatch.json')?.records;
