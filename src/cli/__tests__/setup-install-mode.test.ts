@@ -8,6 +8,7 @@ import {
 	lstat,
 	mkdir,
 	mkdtemp,
+	realpath,
 	readFile,
 	readdir,
 	rm,
@@ -758,8 +759,7 @@ async function removeExternalOmxPluginCacheLivePins(codexHomeDir: string): Promi
 async function createExternalOmxPluginCacheLivePin(cacheDir: string, sessionId: string, codexHomeDir: string): Promise<void> {
 	// Create an external live pin in the correct location for testing
 	// The external pins are stored in: ~/.codex/.omx/plugin-cache-live-pins/${rootHash}-${versionHash}
-	const { realpath: realpathFn } = await import("node:fs/promises");
-	const canonicalCacheDir = await realpathFn(cacheDir).catch(() => cacheDir);
+	const canonicalCacheDir = await realpath(cacheDir).catch(() => cacheDir);
 	const pluginBase = dirname(canonicalCacheDir);
 	const version = basename(canonicalCacheDir);
 	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
