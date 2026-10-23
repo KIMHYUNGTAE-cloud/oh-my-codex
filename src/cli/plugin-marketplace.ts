@@ -60,6 +60,20 @@ const OMX_PLUGIN_CACHE_STAGING_PREFIX = ".omx-plugin-";
 const TEAM_MODE_PLUGIN_SKILL_NAMES = new Set(["team", "worker"]);
 
 /**
+ * Compute the state path for a plugin version's live pin directory.
+ * This path is used consistently by both readers and writers.
+ * pluginRoot is the version-specific directory (e.g., ~/.codex/plugins/cache/.../0.21.33).
+ * We use the parent directory (plugin base) as the key, along with the version.
+ * The pluginRoot must be canonicalized (realpath) to ensure consistency across symlinks.
+ */
+function omxPluginCacheLivePinStatePath(canonicalPluginRoot: string, version: string): string {
+	const canonicalPluginBase = dirname(canonicalPluginRoot); // Remove version component to get stable plugin base
+	const rootHash = createHash("sha256").update(canonicalPluginBase).digest("hex").slice(0, 16);
+	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
+	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
+}
+
+/**
  * Open or create the OMX-owned live pin state directory.
  * This directory is outside the plugin cache to avoid invalidating hook approvals.
  */
@@ -68,7 +82,9 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 	version: string,
 ): Promise<DirectoryRef | null> {
 	try {
-		const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
+		// Canonicalize the plugin root to ensure consistent hashing across symlinks
+		const canonicalPluginRoot = await realpath(pluginRoot).catch(() => pluginRoot);
+		const statePath = omxPluginCacheLivePinStatePath(canonicalPluginRoot, version);
 		// Create parent directories and the pin directory
 		await mkdir(statePath, { recursive: true });
 		// Open and return the directory reference
@@ -79,19 +95,6 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 }
 
 /**
- * Compute the state path for a plugin version's live pin directory.
- * This path is used consistently by both readers and writers.
- * pluginRoot is the version-specific directory (e.g., ~/.codex/plugins/cache/.../0.21.33).
- * We use the parent directory (plugin base) as the key, along with the version.
- */
-function omxPluginCacheLivePinStatePath(pluginRoot: string, version: string): string {
-	const pluginBase = dirname(pluginRoot); // Remove version component to get stable plugin base
-	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
-	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
-	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
-}
-
-/**
  * Open the external state directory for reading live pin records.
  */
 async function openOmxPluginCacheLivePinStateDirectory(
@@ -99,7 +102,9 @@ async function openOmxPluginCacheLivePinStateDirectory(
 	version: string,
 ): Promise<DirectoryRef | null> {
 	try {
-		const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
+		// Canonicalize the plugin root to ensure consistent hashing across symlinks
+		const canonicalPluginRoot = await realpath(pluginRoot).catch(() => pluginRoot);
+		const statePath = omxPluginCacheLivePinStatePath(canonicalPluginRoot, version);
 		return await openDirectoryRef(statePath);
 	} catch (error) {
 		return null;

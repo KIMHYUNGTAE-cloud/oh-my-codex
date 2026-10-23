@@ -744,6 +744,41 @@ async function seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir: string)
 	return cacheDir;
 }
 
+async function removeExternalOmxPluginCacheLivePins(codexHomeDir: string): Promise<void> {
+	// Remove external live pins directory
+	// The external pins are stored in: ~/.codex/.omx/plugin-cache-live-pins/${rootHash}-${versionHash}
+	const externalPinsDir = join(codexHomeDir, ".omx", "plugin-cache-live-pins");
+	try {
+		await rm(externalPinsDir, { recursive: true, force: true });
+	} catch {
+		// Ignore if directory doesn't exist
+	}
+}
+
+async function createExternalOmxPluginCacheLivePin(cacheDir: string, sessionId: string, codexHomeDir: string): Promise<void> {
+	// Create an external live pin in the correct location for testing
+	// The external pins are stored in: ~/.codex/.omx/plugin-cache-live-pins/${rootHash}-${versionHash}
+	const { realpath: realpathFn } = await import("node:fs/promises");
+	const canonicalCacheDir = await realpathFn(cacheDir).catch(() => cacheDir);
+	const pluginBase = dirname(canonicalCacheDir);
+	const version = basename(canonicalCacheDir);
+	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
+	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
+	const externalPinDir = join(codexHomeDir, ".omx", "plugin-cache-live-pins", `${rootHash}-${versionHash}`);
+	await mkdir(externalPinDir, { recursive: true });
+	const sessionHash = createHash("sha256").update(sessionId).digest("hex");
+	const pinRecord = {
+		version: 1,
+		pid: process.pid,
+		processStartHash: null,
+		sessionHash,
+	};
+	const pinFileName = `pin-${process.pid}-${sessionHash.slice(0, 24)}-unknown.json`;
+	const pinFilePath = join(externalPinDir, pinFileName);
+	await writeFile(pinFilePath, `${JSON.stringify(pinRecord)}
+`);
+}
+
 async function packagedPluginCacheDir(codexHomeDir: string): Promise<string> {
 	const manifest = JSON.parse(
 		await readFile(
@@ -1555,7 +1590,8 @@ describe("omx setup install mode behavior", () => {
 					assert.match(pinnedOutput, /close that session before repairing it/);
 					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, "/stale/node");
 
-					await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
+					// Remove external live pins to allow repair to proceed
+					await removeExternalOmxPluginCacheLivePins(codexHomeDir);
 					const repairedOutput = await captureConsoleOutput(async () => {
 						await setup({
 							scope: "user",
@@ -1626,18 +1662,8 @@ describe("omx setup install mode behavior", () => {
 										// Run the hook only once, the first time it's called
 										if (!hookCalled) {
 											hookCalled = true;
-											const { createHash } = await import("node:crypto");
-											const sessionHash = createHash("sha256").update("test-late-pin-session").digest("hex");
-											const pinDir = join(path, ".omx-live-pin");
-											await mkdir(pinDir, { recursive: true });
-											const pinRecord = {
-												version: 1,
-												pid: process.pid,
-												processStartHash: null,
-												sessionHash,
-											};
-											const pinFilePath = join(pinDir, `session-${sessionHash}.json`);
-											await writeFile(pinFilePath, `${JSON.stringify(pinRecord)}\n`);
+											// Create the pin in the external directory
+											await createExternalOmxPluginCacheLivePin(path, "test-late-pin-session", codexHomeDir2a);
 										}
 									},
 								});
