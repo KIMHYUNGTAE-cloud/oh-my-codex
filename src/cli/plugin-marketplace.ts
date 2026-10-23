@@ -60,16 +60,6 @@ const OMX_PLUGIN_CACHE_STAGING_PREFIX = ".omx-plugin-";
 const TEAM_MODE_PLUGIN_SKILL_NAMES = new Set(["team", "worker"]);
 
 /**
- * Compute the path to the OMX-owned live pin directory for a plugin version.
- * Keyed by plugin root hash + version to isolate pin state by version.
- */
-function omxPluginCacheLivePinStatePath(pluginRoot: string, version: string): string {
-	const rootHash = createHash("sha256").update(pluginRoot).digest("hex").slice(0, 16);
-	const versionHash = omxPluginCacheLivePinVersionHash(version);
-	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
-}
-
-/**
  * Open or create the OMX-owned live pin state directory.
  * This directory is outside the plugin cache to avoid invalidating hook approvals.
  */
@@ -77,8 +67,11 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 	pluginRoot: string,
 	version: string,
 ): Promise<DirectoryRef | null> {
-	const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
 	try {
+		// Compute the pin directory path: ~/.omx/plugin-cache-live-pins/{rootHash}-{versionHash}
+		const rootHash = createHash("sha256").update(pluginRoot).digest("hex").slice(0, 16);
+		const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
+		const statePath = join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
 		// Create parent directories and the pin directory
 		await mkdir(statePath, { recursive: true });
 		// Open and return the directory reference
