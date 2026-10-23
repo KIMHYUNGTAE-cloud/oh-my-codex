@@ -516,7 +516,8 @@ setInterval(() => {}, 60_000);
 					["0.19.0", "0.20.0", "0.20.1"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
 				const pluginRoot = snapshots[1]!;
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
+				// Pins are now in external state directory, not inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
 				const expiredAt = new Date(Date.now() - 60 * 60 * 1000);
 				await utimes(pluginRoot, expiredAt, expiredAt);
 				const hook = spawn(
@@ -812,8 +813,9 @@ syncBuiltinESMExports();
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
 				const pluginRoot = snapshots[0]!;
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				const expiredAt = new Date(Date.now() - 6 * 60 * 1000);
 				await utimes(pinDirectory, expiredAt, expiredAt);
 
@@ -1093,8 +1095,9 @@ syncBuiltinESMExports();
 				const snapshots = await Promise.all(
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 
 				const retired = await retireUnpinnedManagedSnapshots(codexHomeDir, "0.20.3");
 
@@ -1116,8 +1119,9 @@ syncBuiltinESMExports();
 				const snapshots = await Promise.all(
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				const expiredAt = new Date(Date.now() - 6 * 60 * 1000);
 				await utimes(pinDirectory, expiredAt, expiredAt);
 
@@ -1229,8 +1233,9 @@ syncBuiltinESMExports();
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
 				const sessionHash = createHash("sha256").update("expired-pending-session").digest("hex");
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				assert.equal(await registerOmxPluginCacheLivePin(snapshots[0]!, "pending-marker-live-session", process.pid), true);
 				const pendingPath = join(pinDirectory, `.pending-${sessionHash}.json`);
 				await writeFile(pendingPath, `${JSON.stringify({ version: 1, sessionHash })}\n`);
@@ -1299,11 +1304,12 @@ syncBuiltinESMExports();
 					);
 					const content = `${JSON.stringify({ version: 1, cacheVersion: version, sessionHash })}\n`;
 					const snapshot = snapshots[version === "0.20.1" ? 1 : 2]!;
-					const pinDirectory = join(snapshot, ".omx-live-pin");
+					// Use external state directory instead of .omx-live-pin inside plugin root
+					const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshot, version);
 					const pendingPinPath = join(pinDirectory, `.pending-${sessionHash}.json`);
 					const pinStagePath = join(pinDirectory, `.stage-pending-${sessionHash}-99999-abandoned`);
 					const pinContent = `${JSON.stringify({ version: 1, sessionHash })}\n`;
-					await mkdir(pinDirectory);
+					await mkdir(pinDirectory, { recursive: true });
 					await writeFile(intentPath, content);
 					await writeFile(stagePath, content);
 					await writeFile(pendingPinPath, pinContent);
@@ -1327,7 +1333,8 @@ syncBuiltinESMExports();
 						lstat(join(cacheBase, `.stage-omx-live-pin-intent-${versionHash}-${sessionHash}-99999-abandoned`)),
 						{ code: "ENOENT" },
 					);
-					const pinDirectory = join(snapshots[version === "0.20.1" ? 1 : 2]!, ".omx-live-pin");
+					// Use external state directory instead of .omx-live-pin inside plugin root
+					const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[version === "0.20.1" ? 1 : 2]!, version);
 					await assert.rejects(lstat(join(pinDirectory, `.pending-${sessionHash}.json`)), { code: "ENOENT" });
 					await assert.rejects(lstat(join(pinDirectory, `.stage-pending-${sessionHash}-99999-abandoned`)), { code: "ENOENT" });
 					await lstat(snapshots[version === "0.20.1" ? 1 : 2]!);
@@ -1356,7 +1363,8 @@ syncBuiltinESMExports();
 
 				await assert.rejects(lstat(lock.path), { code: "ENOENT" });
 				await assert.rejects(lstat(lock.stagePath), { code: "ENOENT" });
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				// Pins are now in external state directory, not inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
 				const sessionHash = createHash("sha256").update("dead-lock-recovery-session").digest("hex");
 				const records = await Promise.all(
 					(await readdir(pinDirectory)).map(
@@ -1453,8 +1461,9 @@ syncBuiltinESMExports();
 				const sessionId = "reused-pid-fallback-session";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "0".repeat(24);
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				await writeFile(
 					join(pinDirectory, `pin-${process.pid}-${sessionHash.slice(0, 24)}-${staleProcessStartHash}.json`),
 					`${JSON.stringify({ version: 1, pid: process.pid, processStartHash: staleProcessStartHash, sessionHash })}\n`,
@@ -1499,8 +1508,9 @@ syncBuiltinESMExports();
 				const sessionId = "aged-same-session-pin";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "a".repeat(24);
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				const stalePinPath = join(pinDirectory, `pin-${process.pid}-${sessionHash.slice(0, 24)}-${staleProcessStartHash}.json`);
 				await writeFile(
 					stalePinPath,
@@ -2170,7 +2180,8 @@ process.stdout.write("{}\\n");
 				assert.equal(hookResult.status, 0, hookResult.stderr || hookResult.stdout);
 				await assert.rejects(lstat(lock.path), { code: "ENOENT" });
 				await assert.rejects(lstat(lock.stagePath), { code: "ENOENT" });
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
+				// Pins are now in external state directory, not inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const records = await Promise.all(
 					(await readdir(pinDirectory)).map(
@@ -2300,7 +2311,9 @@ process.stdout.write("{}\\n");
 				assert.match(blocked.reason ?? "", /pinned by a live Codex session/);
 				assert.equal(JSON.parse(await readFile(manifestPath, "utf-8")).version, "corrupted-version");
 
-				await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
+				// Remove pins from external state directory instead of old .omx-live-pin location
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, cacheDir, expectedVersion);
+				await rm(pinDirectory, { recursive: true, force: true });
 				const repaired = await materializePackagedOmxPluginCache(codexHomeDir, packaged, { repairCache: true });
 				assert.equal(repaired.status, "materialized", JSON.stringify(repaired));
 				assert.equal(repaired.version, expectedVersion);
@@ -2319,8 +2332,9 @@ process.stdout.write("{}\\n");
 				const sessionId = "fresh-stale-session-pin";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "0".repeat(24);
-				const pinDirectory = join(pluginRoot, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, pluginRoot, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				const stalePinPath = join(
 					pinDirectory,
 					`pin-${process.pid}-${sessionHash.slice(0, 24)}-${staleProcessStartHash}.json`,
@@ -2367,7 +2381,8 @@ process.stdout.write("{}\\n");
 				const sessionId = "resumed-session";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "000000000000000000000000";
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
 				await mkdir(pinDirectory, { recursive: true });
 				await writeFile(
 					join(pinDirectory, "stale-reused-pid.json"),
@@ -2447,7 +2462,8 @@ process.stdout.write("{}\\n");
 				const sessionId = "resumed-session";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "000000000000000000000000";
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				// Use external state directory instead of .omx-live-pin inside plugin root
+				const pinDirectory = omxPluginCacheLivePinStateDirectory(codexHomeDir, snapshots[0]!, "0.20.0");
 				await mkdir(pinDirectory, { recursive: true });
 				await writeFile(
 					join(pinDirectory, "stale-reused-pid.json"),
