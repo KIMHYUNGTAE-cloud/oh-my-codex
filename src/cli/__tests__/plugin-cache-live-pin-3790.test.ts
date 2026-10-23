@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { chmod, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -111,8 +111,14 @@ function livePinIntentPath(codexHomeDir: string, version: string, sessionId: str
 
 function omxPluginCacheLivePinStateDirectory(codexHomeDir: string, pluginRoot: string, version: string): string {
 	// This should match the logic in the CLI's omxPluginCacheLivePinStatePath function
-	// For tests, we don't canonicalize since test paths don't have symlinks
-	const pluginBase = dirname(pluginRoot);
+	// Must canonicalize paths to match hook behavior (tmpdir on macOS has /var <-> /private/var symlink)
+	let canonicalPluginRoot = pluginRoot;
+	try {
+		canonicalPluginRoot = realpathSync(pluginRoot);
+	} catch {
+		// If realpath fails, fall back to pluginRoot
+	}
+	const pluginBase = dirname(canonicalPluginRoot);
 	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
 	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
 	return join(codexHomeDir, ".omx", "plugin-cache-live-pins", `${rootHash}-${versionHash}`);
