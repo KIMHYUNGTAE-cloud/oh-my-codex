@@ -44,43 +44,54 @@ describe("issue 3898 - live pins moved out of plugin cache", () => {
 		await mkdir(tempHome, { recursive: true });
 
 		const codexHomeDir = tempHome;
-		const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
-		assert.ok(packagedMarketplace, "Expected packaged marketplace");
-
-		const result = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace, {
-			teamMode: undefined,
-		});
-		assert.ok(result.result === "materialized" || result.result === "already-present", "Failed to materialize cache");
-
-		const cacheBase = omxPluginCacheBase(codexHomeDir);
-		const pluginRoot = join(cacheBase, "oh-my-codex-local", "oh-my-codex", packageVersion.version);
-		const legacyPinDir = join(pluginRoot, ".omx-live-pin");
-
-		// Register a live pin
-		const sessionId = `test-session-${randomUUID()}`;
-		const ownerPid = process.pid;
-		const registered = await registerOmxPluginCacheLivePin(pluginRoot, sessionId, ownerPid);
-		assert.ok(registered, "Failed to register live pin");
-
-		// Verify .omx-live-pin directory was NOT created inside plugin cache
+		const originalCodexHome = process.env.CODEX_HOME;
 		try {
-			const stat = await (await import("node:fs/promises")).stat(legacyPinDir);
-			assert.fail(
-				`Legacy pin directory should not exist at ${legacyPinDir}. ` +
-					`Pin files must be in OMX-owned state (~/.omx/plugin-cache-live-pins/) ` +
-					`to avoid invalidating Codex hook approvals.`,
-			);
-		} catch (error) {
-			// Expected: directory should not exist
-			const err = error as NodeJS.ErrnoException;
-			assert.equal(
-				err.code,
-				"ENOENT",
-				`Expected ENOENT when checking legacy pin directory, got: ${err.code}`,
-			);
-		}
+			process.env.CODEX_HOME = codexHomeDir;
 
-		// Verify that plugin cache contents hash is not affected by pin registration
-		// (This is verified indirectly by the absence of pin files in the cache)
+			const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
+			assert.ok(packagedMarketplace, "Expected packaged marketplace");
+
+			const result = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace, {
+				teamMode: undefined,
+			});
+			assert.ok(result.status === "materialized" || result.status === "unchanged", "Failed to materialize cache");
+
+			const cacheBase = omxPluginCacheBase(codexHomeDir);
+			const pluginRoot = join(cacheBase, "oh-my-codex-local", "oh-my-codex", packageVersion.version);
+			const legacyPinDir = join(pluginRoot, ".omx-live-pin");
+
+			// Register a live pin
+			const sessionId = `test-session-${randomUUID()}`;
+			const ownerPid = process.pid;
+			const registered = await registerOmxPluginCacheLivePin(pluginRoot, sessionId, ownerPid);
+			assert.ok(registered, "Failed to register live pin");
+
+			// Verify .omx-live-pin directory was NOT created inside plugin cache
+			try {
+				const stat = await (await import("node:fs/promises")).stat(legacyPinDir);
+				assert.fail(
+					`Legacy pin directory should not exist at ${legacyPinDir}. ` +
+						`Pin files must be in OMX-owned state (~/.omx/plugin-cache-live-pins/) ` +
+						`to avoid invalidating Codex hook approvals.`,
+				);
+			} catch (error) {
+				// Expected: directory should not exist
+				const err = error as NodeJS.ErrnoException;
+				assert.equal(
+					err.code,
+					"ENOENT",
+					`Expected ENOENT when checking legacy pin directory, got: ${err.code}`,
+				);
+			}
+
+			// Verify that plugin cache contents hash is not affected by pin registration
+			// (This is verified indirectly by the absence of pin files in the cache)
+		} finally {
+			if (originalCodexHome !== undefined) {
+				process.env.CODEX_HOME = originalCodexHome;
+			} else {
+				delete process.env.CODEX_HOME;
+			}
+		}
 	});
 });

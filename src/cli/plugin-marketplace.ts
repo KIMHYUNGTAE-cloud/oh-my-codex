@@ -1727,7 +1727,7 @@ export async function registerOmxPluginCacheLivePin(
 	};
 	const durability: RegularFileDurabilityTracker = { degraded: false };
 	let snapshotRef: DirectoryRef | undefined;
-	let pinDirectoryRef: DirectoryRef | undefined;
+	let pinDirectoryRef: DirectoryRef | null = null;
 	let mutationLockContent: string | null = null;
 	let stageName: string | undefined;
 	let stageCreated = false;
