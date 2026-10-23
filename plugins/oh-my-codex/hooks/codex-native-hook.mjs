@@ -533,18 +533,20 @@ function livePinDirectory(pluginRoot) {
     // Compute external state directory path instead of using .omx-live-pin inside plugin root
     // This prevents live pins from changing the plugin content and invalidating Codex's hook approval
     // Canonicalize paths to handle symlinks consistently (e.g., /var vs /private/var on macOS)
+    // Must match the order in CLI's omxPluginCacheLivePinStatePath for consistency
     let codexHome = resolve(process.env.CODEX_HOME || join(homedir(), '.codex'));
     try {
       codexHome = realpathSync(codexHome);
     } catch (error) {
       // If realpath fails, fall back to resolved path
     }
-    let canonicalPluginBase = dirname(absoluteRoot);
+    let canonicalPluginRoot = absoluteRoot;
     try {
-      canonicalPluginBase = realpathSync(canonicalPluginBase);
+      canonicalPluginRoot = realpathSync(absoluteRoot);
     } catch (error) {
-      // If realpath fails, fall back to dirname of absoluteRoot
+      // If realpath fails, fall back to absoluteRoot
     }
+    const canonicalPluginBase = dirname(canonicalPluginRoot);  // Take dirname AFTER canonicalization, matching CLI order
     const rootHash = createHash('sha256').update(canonicalPluginBase).digest('hex').slice(0, 16);
     const versionHash = createHash('sha256').update(version).digest('hex').slice(0, 24);
     const pinDir = join(codexHome, '.omx', 'plugin-cache-live-pins', `${rootHash}-${versionHash}`);
