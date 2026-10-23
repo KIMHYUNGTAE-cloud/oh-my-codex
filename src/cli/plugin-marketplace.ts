@@ -1801,7 +1801,8 @@ export async function registerOmxPluginCacheLivePin(
 				!(await hasRegularPublicationMarker(snapshotRef.operationPath, OMX_PLUGIN_MANAGED_MARKER))
 			)
 				return false;
-			return await hasLiveSessionPinRecord(rootPath, version, ownerPid, sessionHash);
+			const canonicalRootPath = await canonicalRealpath(rootPath);
+			return await hasLiveSessionPinRecord(canonicalRootPath ?? rootPath, version, ownerPid, sessionHash);
 		}
 		const [canonicalRoot, canonicalExpected] = await Promise.all([
 			canonicalRealpath(rootPath),
