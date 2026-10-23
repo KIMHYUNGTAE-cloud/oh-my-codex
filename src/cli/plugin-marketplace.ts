@@ -79,18 +79,10 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 ): Promise<DirectoryRef | null> {
 	const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
 	try {
-		const parentDir = dirname(statePath);
-		await mkdir(parentDir, { recursive: true });
-		const pinRef = await openDirectoryRef(statePath);
-		// Create the directory if it doesn't exist
-		try {
-			await mkdir(statePath, { recursive: true });
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		}
-		// Re-open after creating to get the correct DirectoryRef
-		await pinRef.handle.close();
-		return openDirectoryRef(statePath);
+		// Create parent directories and the pin directory
+		await mkdir(statePath, { recursive: true });
+		// Open and return the directory reference
+		return await openDirectoryRef(statePath);
 	} catch (error) {
 		return null;
 	}
