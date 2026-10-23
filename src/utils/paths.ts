@@ -391,6 +391,11 @@ export function omxUserInstallStampPath(codexHomeDir?: string): string {
   return join(codexHomeDir || codexHome(), ".omx", "install-state.json");
 }
 
+/** oh-my-codex plugin cache live pin state directory (.omx/plugin-cache-live-pins/) */
+export function omxPluginCacheLivePinDir(projectRoot?: string): string {
+  return join(omxRoot(projectRoot), "plugin-cache-live-pins");
+}
+
 /** Get the package root directory (where agents/, skills/, prompts/ live) */
 export function packageRoot(): string {
   try {

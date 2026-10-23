@@ -1,7 +1,7 @@
 import { constants as fsConstants, existsSync, type Stats } from "fs";
 import { createHash, randomUUID } from "crypto";
 import { link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, rmdir, type FileHandle } from "fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
 import { teamModeEnabled, type SetupTeamMode } from "../config/team-mode.js";
 import { hashProcessStartIdentity, readProcessStartIdentity } from "../state/process-identity.js";
@@ -13,7 +13,7 @@ import {
 	syncRegularFile,
 	type RegularFileDurabilityTracker,
 } from "../utils/file-durability.js";
-import { codexHome } from "../utils/paths.js";
+import { codexHome, omxPluginCacheLivePinDir } from "../utils/paths.js";
 
 export const OMX_LOCAL_MARKETPLACE_NAME = "oh-my-codex-local";
 export const OMX_PLUGIN_NAME = "oh-my-codex";
@@ -58,6 +58,43 @@ const OMX_PLUGIN_LIVE_PIN_INITIALIZATION_LEASE_MS = 5 * 60 * 1000;
 const OMX_PLUGIN_LIVE_PIN_MUTATION_LOCK_PIN_WAIT_MS = 5_000;
 const OMX_PLUGIN_CACHE_STAGING_PREFIX = ".omx-plugin-";
 const TEAM_MODE_PLUGIN_SKILL_NAMES = new Set(["team", "worker"]);
+
+/**
+ * Compute the path to the OMX-owned live pin directory for a plugin version.
+ * Keyed by plugin root hash + version to isolate pin state by version.
+ */
+function omxPluginCacheLivePinStatePath(pluginRoot: string, version: string): string {
+	const rootHash = createHash("sha256").update(pluginRoot).digest("hex").slice(0, 16);
+	const versionHash = omxPluginCacheLivePinVersionHash(version);
+	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
+}
+
+/**
+ * Open or create the OMX-owned live pin state directory.
+ * This directory is outside the plugin cache to avoid invalidating hook approvals.
+ */
+async function openOrCreateOmxPluginCacheLivePinStateDirectory(
+	pluginRoot: string,
+	version: string,
+): Promise<DirectoryRef | null> {
+	const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
+	try {
+		const parentDir = dirname(statePath);
+		await mkdir(parentDir, { recursive: true });
+		const pinRef = await openDirectoryRef(statePath);
+		// Create the directory if it doesn't exist
+		try {
+			await mkdir(statePath, { recursive: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		// Re-open after creating to get the correct DirectoryRef
+		await pinRef.handle.close();
+		return openDirectoryRef(statePath);
+	} catch (error) {
+		return null;
+	}
+}
 
 export async function resolvePackagedOmxMarketplace(
 	packageRoot: string,
@@ -1764,26 +1801,27 @@ export async function registerOmxPluginCacheLivePin(
 			!(await hasRegularPublicationMarker(snapshotRef.operationPath, OMX_PLUGIN_MANAGED_MARKER))
 		)
 			return false;
-		const markerPath = join(snapshotRef.operationPath, OMX_PLUGIN_LIVE_PIN_MARKER);
-		let markerStats: Stats | null = null;
+		// Legacy cleanup: remove .omx-live-pin directory from plugin cache if it exists
+		// (it's now in OMX-owned state to avoid invalidating hook approvals)
+		const legacyMarkerPath = join(snapshotRef.operationPath, OMX_PLUGIN_LIVE_PIN_MARKER);
+		let legacyMarkerStats: Stats | null = null;
 		try {
-			markerStats = await lstat(markerPath);
+			legacyMarkerStats = await lstat(legacyMarkerPath);
 		} catch (error) {
 			if (!isMissingPathError(error)) throw error;
 		}
-		if (markerStats?.isFile() && !markerStats.isSymbolicLink()) {
+		if (legacyMarkerStats?.isFile() && !legacyMarkerStats.isSymbolicLink()) {
+			// Legacy file marker - was used in earlier code, can be safely removed
 			await removePendingOmxPluginCacheLivePinIntent(cacheBaseRef, version, sessionHash);
 			return true;
 		}
-		if (markerStats && (markerStats.isSymbolicLink() || !markerStats.isDirectory())) return false;
-		if (!markerStats) {
-			try {
-				await mkdirDirectoryChildExclusive(snapshotRef, OMX_PLUGIN_LIVE_PIN_MARKER);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			}
+		if (legacyMarkerStats && (legacyMarkerStats.isSymbolicLink() || !legacyMarkerStats.isDirectory())) {
+			return false; // Invalid marker state
 		}
-		pinDirectoryRef = await openDirectoryChild(snapshotRef, OMX_PLUGIN_LIVE_PIN_MARKER);
+		// If legacy marker directory exists, it will be cleaned up on next GC pass
+		// Open or create the pin directory in OMX-owned state, NOT inside plugin cache
+		pinDirectoryRef = await openOrCreateOmxPluginCacheLivePinStateDirectory(rootPath, version);
+		if (!pinDirectoryRef) return false;
 		await writePendingOmxPluginCacheLivePinRegistration(pinDirectoryRef, sessionHash);
 		const processStartIdentity = await readProcessStartIdentity(ownerPid);
 		const processStartHash = processStartIdentity ? hashProcessStartIdentity(processStartIdentity) : null;
