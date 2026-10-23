@@ -508,17 +508,20 @@ export async function rollbackProvisionedWorktrees(
     .reverse();
 
   const errors: string[] = [];
+  const preserved: Array<{ worktreePath: string; reason: string }> = [];
 
   for (const result of created) {
-    try {
-      await execFilePromise('git', ['worktree', 'remove', '--force', result.worktreePath], {
-        cwd: result.repoRoot,
-        encoding: 'utf-8',
-      });
-    } catch (err: unknown) {
-      const stderr = ((err as Record<string, unknown>).stderr as string ?? '').trim();
-      const exitCode = (err as Record<string, unknown>).code;
-      errors.push(`remove:${result.worktreePath}:${stderr || `exit_${exitCode}`}`);
+    // Check if it's safe to remove before attempting removal
+    const safeToRemove = await removeWorktreeIfSafe(result.repoRoot, result.worktreePath);
+    if (!safeToRemove.removed) {
+      if (safeToRemove.nonRegenerableFiles && safeToRemove.nonRegenerableFiles.length > 0) {
+        preserved.push({
+          worktreePath: result.worktreePath,
+          reason: `contains_non_regenerable_ignored_files:${safeToRemove.nonRegenerableFiles.join(',')}`,
+        });
+      } else {
+        errors.push(`remove:${result.worktreePath}:removal_failed`);
+      }
       continue;
     }
 
@@ -546,6 +549,120 @@ export async function rollbackProvisionedWorktrees(
   if (errors.length > 0) {
     throw new Error(`worktree_rollback_failed:${errors.join(' | ')}`);
   }
+
+  // Log preserved worktrees for debugging
+  if (preserved.length > 0) {
+    process.stdout.write(`[worktree] preserved ${preserved.length} worktree(s) with non-regenerable ignored files: ${preserved.map(p => `${p.worktreePath}(${p.reason})`).join('; ')}\n`);
+  }
+}
+
+/**
+ * Non-regenerable ignored files that would be lost if a worktree is removed.
+ * These are paths that are intentionally ignored but contain worker data.
+ */
+export interface NonRegenerableIgnoredFiles {
+  found: boolean;
+  paths: string[];
+}
+
+/**
+ * Patterns for directories that are safe to delete because they can be regenerated.
+ * These patterns match directory names at any depth in the worktree.
+ */
+const REGENERABLE_IGNORE_PATTERNS = [
+  'node_modules',
+  'dist',
+  'build',
+  'target',
+  '.cache',
+  '.pytest_cache',
+  '.tox',
+  '__pycache__',
+  '.mypy_cache',
+  '.eggs',
+  '*.egg-info',
+  '.venv',
+  '.env',
+];
+
+/**
+ * Check if an ignored path is safe to delete (regenerable).
+ * Paths that are top-level regenerable directories are considered safe.
+ */
+function isRegenerableIgnoredPath(path: string): boolean {
+  // Normalize the path to use forward slashes
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(p => p.length > 0);
+  
+  if (parts.length === 0) return false;
+  
+  const firstPart = parts[0];
+  
+  // Check if the first part matches a regenerable pattern
+  for (const pattern of REGENERABLE_IGNORE_PATTERNS) {
+    if (pattern.includes('*')) {
+      // Handle glob patterns
+      const regex = new RegExp(`^${pattern.replace(/\./g, '\\.').replace(/\*/g, '.*')}$`);
+      if (regex.test(firstPart)) return true;
+    } else {
+      // Exact match
+      if (firstPart === pattern) return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Enumerate ignored files in a worktree that are not in the regenerable allowlist.
+ */
+export async function checkNonRegenerableIgnoredFiles(
+  worktreePath: string,
+  repoRoot: string,
+): Promise<NonRegenerableIgnoredFiles> {
+  try {
+    // Use git status to find ignored files
+    const result: any = await execFilePromise('git', [
+      'status',
+      '--ignored',
+      '--porcelain=v1',
+      '-z',
+    ], {
+      cwd: worktreePath,
+      encoding: 'utf-8',
+      maxBuffer: 1024 * 1024 * 10, // 10MB buffer for large ignored trees
+    });
+    
+    const stdout = typeof result === 'string' ? result : result.stdout;
+    if (!stdout) {
+      return { found: false, paths: [] };
+    }
+    
+    // Parse null-terminated output
+    const ignoredFiles: string[] = [];
+    const entries = stdout.split('\0').filter((e: string) => e.length > 0);
+    
+    for (const entry of entries) {
+      // Format is "!! <path>"
+      if (entry.startsWith('!! ')) {
+        const filePath = entry.substring(3);
+        ignoredFiles.push(filePath);
+      }
+    }
+    
+    // Filter to only non-regenerable paths
+    const nonRegenerablePaths = ignoredFiles.filter(
+      path => !isRegenerableIgnoredPath(path),
+    );
+    
+    return {
+      found: nonRegenerablePaths.length > 0,
+      paths: nonRegenerablePaths,
+    };
+  } catch (error) {
+    // If we can't check ignored files, assume there are none to be safe
+    return { found: false, paths: [] };
+  }
 }
 
 export async function removeWorktreeForce(repoRoot: string, worktreePath: string): Promise<void> {
@@ -553,4 +670,36 @@ export async function removeWorktreeForce(repoRoot: string, worktreePath: string
     cwd: repoRoot,
     encoding: 'utf-8',
   });
+}
+
+/**
+ * Remove a worktree, but preserve it if it contains non-regenerable ignored files.
+ * Returns true if the worktree was removed, false if it was preserved.
+ */
+export async function removeWorktreeIfSafe(
+  repoRoot: string,
+  worktreePath: string,
+): Promise<{ removed: boolean; nonRegenerableFiles?: string[] }> {
+  // Check for non-regenerable ignored files
+  const ignoredFiles = await checkNonRegenerableIgnoredFiles(worktreePath, repoRoot);
+  
+  if (ignoredFiles.found) {
+    // Preserve the worktree and return the list of non-regenerable files
+    return {
+      removed: false,
+      nonRegenerableFiles: ignoredFiles.paths,
+    };
+  }
+  
+  // Safe to remove
+  try {
+    await removeWorktreeForce(repoRoot, worktreePath);
+    return { removed: true };
+  } catch (error) {
+    // If removal fails, treat it as not removed
+    return {
+      removed: false,
+      nonRegenerableFiles: undefined,
+    };
+  }
 }
