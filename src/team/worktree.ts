@@ -675,8 +675,9 @@ export async function checkNonRegenerableIgnoredFiles(
       paths: nonRegenerablePaths,
     };
   } catch (error) {
-    // If we can't check ignored files, assume there are none to be safe
-    return { found: false, paths: [] };
+    // If we can't check ignored files, preserve the worktree to be safe
+    // This is fail-closed behavior: when enumeration fails, we err on the side of preservation
+    return { found: true, paths: ['<enumeration_failed>'] };
   }
 }
 
