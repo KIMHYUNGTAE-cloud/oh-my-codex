@@ -1560,10 +1560,14 @@ async function isLivePinnedSnapshot(
 	if (await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent)) return true;
 	if (await isPrePinManagedSnapshot(snapshotRef, version)) return true;
 	// Check for live pins in the external state directory
-	const externalPinDir = await openOmxPluginCacheLivePinStateDirectory(snapshotRef.path, version);
-	if (externalPinDir) {
-		await externalPinDir.handle.close().catch(() => undefined);
-		return true;
+	try {
+		const externalPinDir = await openOmxPluginCacheLivePinStateDirectory(snapshotRef.path, version);
+		if (externalPinDir) {
+			await externalPinDir.handle.close().catch(() => undefined);
+			return true;
+		}
+	} catch {
+		// Ignore errors in external directory check - fallback to legacy location
 	}
 	const markerPath = join(snapshotRef.operationPath, OMX_PLUGIN_LIVE_PIN_MARKER);
 	let markerStats: Stats;
