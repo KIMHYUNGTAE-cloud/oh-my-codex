@@ -1762,7 +1762,7 @@ export async function registerOmxPluginCacheLivePin(
 	const version = relativeRoot;
 	const expectedCacheDir = join(cacheBase, version);
 
-	const namespace = await openManagedCacheNamespace(cacheBase, codexHomeDir, { create: false });
+	const namespace = await openManagedCacheNamespace(cacheBase, effectiveCodexHome, { create: false });
 	if (!namespace) return false;
 	const cacheBaseRef: DirectoryRef = {
 		handle: namespace.handle,
