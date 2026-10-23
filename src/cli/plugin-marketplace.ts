@@ -1750,9 +1750,13 @@ export async function registerOmxPluginCacheLivePin(
 	)
 		return false;
 	const sessionHash = createHash("sha256").update(normalizedSessionId).digest("hex");
-	const rootPath = resolve(pluginRoot);
 	const codexHomeDir = codexHome();
-	const cacheBase = omxPluginCacheBase(codexHomeDir);
+	// Canonicalize paths to ensure consistent hashing with symlinked directories
+	const canonicalHome = await canonicalRealpath(codexHomeDir);
+	const effectiveCodexHome = canonicalHome ?? codexHomeDir;
+	const cacheBase = omxPluginCacheBase(effectiveCodexHome);
+	const canonicalRoot = await canonicalRealpath(resolve(pluginRoot));
+	const rootPath = canonicalRoot ?? resolve(pluginRoot);
 	const relativeRoot = relative(resolve(cacheBase), rootPath);
 	if (!isSafeCacheVersion(relativeRoot) || relativeRoot.includes(sep) || isAbsolute(relativeRoot)) return false;
 	const version = relativeRoot;
