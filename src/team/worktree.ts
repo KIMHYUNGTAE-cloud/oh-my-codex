@@ -514,7 +514,6 @@ export async function rollbackProvisionedWorktrees(
     // Check for non-regenerable ignored files that should be preserved
     const ignoredFiles = await checkNonRegenerableIgnoredFiles(
       result.worktreePath,
-      result.repoRoot,
     );
     
     if (ignoredFiles.found) {
@@ -635,7 +634,6 @@ function isRegenerableIgnoredPath(path: string): boolean {
  */
 export async function checkNonRegenerableIgnoredFiles(
   worktreePath: string,
-  repoRoot: string,
 ): Promise<NonRegenerableIgnoredFiles> {
   try {
     // Use git status to find ignored files
