@@ -57,8 +57,9 @@ describe("issue 3898 - live pins moved out of plugin cache", () => {
 			assert.ok(result.status === "materialized" || result.status === "unchanged", "Failed to materialize cache");
 
 			const cacheBase = omxPluginCacheBase(codexHomeDir);
-			const pluginRoot = join(cacheBase, "oh-my-codex-local", "oh-my-codex", packageVersion.version);
-			const legacyPinDir = join(pluginRoot, ".omx-live-pin");
+			const pluginRoot = cacheBase; // Plugin root is the base, not the version-specific directory
+			const versionPath = join(pluginRoot, packageVersion.version);
+			const legacyPinDir = join(versionPath, ".omx-live-pin");
 
 			// Register a live pin
 			const sessionId = `test-session-${randomUUID()}`;

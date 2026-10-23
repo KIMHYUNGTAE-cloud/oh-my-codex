@@ -68,13 +68,38 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 	version: string,
 ): Promise<DirectoryRef | null> {
 	try {
-		// Compute the pin directory path: ~/.omx/plugin-cache-live-pins/{rootHash}-{versionHash}
+		// Compute the pin directory path: ~/.codex/.omx/plugin-cache-live-pins/{rootHash}-{versionHash}
 		const rootHash = createHash("sha256").update(pluginRoot).digest("hex").slice(0, 16);
 		const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
 		const statePath = join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
 		// Create parent directories and the pin directory
 		await mkdir(statePath, { recursive: true });
 		// Open and return the directory reference
+		return await openDirectoryRef(statePath);
+	} catch (error) {
+		return null;
+	}
+}
+
+/**
+ * Compute the state path for a plugin version's live pin directory.
+ * This path is used consistently by both readers and writers.
+ */
+function omxPluginCacheLivePinStatePath(pluginRoot: string, version: string): string {
+	const rootHash = createHash("sha256").update(pluginRoot).digest("hex").slice(0, 16);
+	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
+	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
+}
+
+/**
+ * Open the external state directory for reading live pin records.
+ */
+async function openOmxPluginCacheLivePinStateDirectory(
+	pluginRoot: string,
+	version: string,
+): Promise<DirectoryRef | null> {
+	try {
+		const statePath = omxPluginCacheLivePinStatePath(pluginRoot, version);
 		return await openDirectoryRef(statePath);
 	} catch (error) {
 		return null;
@@ -1267,13 +1292,15 @@ async function isLivePinOwnerAlive(record: OmxPluginCacheLivePinRecord): Promise
 }
 
 async function hasLiveSessionPinRecord(
-	snapshotRef: DirectoryRef,
+	pluginRoot: string,
+	version: string,
 	ownerPid: number,
 	sessionHash: string,
 ): Promise<boolean> {
-	let pinDirectoryRef: DirectoryRef | undefined;
+	let pinDirectoryRef: DirectoryRef | null = null;
 	try {
-		pinDirectoryRef = await openDirectoryChild(snapshotRef, OMX_PLUGIN_LIVE_PIN_MARKER);
+		pinDirectoryRef = await openOmxPluginCacheLivePinStateDirectory(pluginRoot, version);
+		if (!pinDirectoryRef) return false;
 		if (await livePinRetirementGateExists(pinDirectoryRef)) return false;
 		for (const entry of await readdir(pinDirectoryRef.scanOperationPath, { withFileTypes: true })) {
 			if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.startsWith("pin-")) continue;
@@ -1532,6 +1559,12 @@ async function isLivePinnedSnapshot(
 ): Promise<boolean> {
 	if (await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent)) return true;
 	if (await isPrePinManagedSnapshot(snapshotRef, version)) return true;
+	// Check for live pins in the external state directory
+	const externalPinDir = await openOmxPluginCacheLivePinStateDirectory(cacheBaseRef.path, version);
+	if (externalPinDir) {
+		await externalPinDir.handle.close().catch(() => undefined);
+		return true;
+	}
 	const markerPath = join(snapshotRef.operationPath, OMX_PLUGIN_LIVE_PIN_MARKER);
 	let markerStats: Stats;
 	try {
@@ -1759,7 +1792,7 @@ export async function registerOmxPluginCacheLivePin(
 				!(await hasRegularPublicationMarker(snapshotRef.operationPath, OMX_PLUGIN_MANAGED_MARKER))
 			)
 				return false;
-			return await hasLiveSessionPinRecord(snapshotRef, ownerPid, sessionHash);
+			return await hasLiveSessionPinRecord(rootPath, version, ownerPid, sessionHash);
 		}
 		const [canonicalRoot, canonicalExpected] = await Promise.all([
 			canonicalRealpath(rootPath),
