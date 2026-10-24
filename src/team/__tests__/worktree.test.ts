@@ -12,6 +12,7 @@ import {
   ensureWorktree,
   rollbackProvisionedWorktrees,
   removeWorktreeForce,
+  replaySubmoduleRecovery,
 } from '../worktree.js';
 
 async function initRepo(): Promise<string> {
@@ -448,6 +449,92 @@ process.exit(r.status ?? 1);
     } finally {
       await rm(repo, { recursive: true, force: true });
       await rm(sub, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('legacy recovery journal scoping', { skip: process.platform === 'win32' }, () => {
+  it('does not block shutdown when legacy recovery journal belongs to another worktree', async () => {
+    const repo = await initRepo();
+    try {
+      // Create worktreeA
+      const worktreeA = join(repo, 'worktreeA');
+      execFileSync('git', ['worktree', 'add', '--detach', worktreeA], { cwd: repo, stdio: 'ignore' });
+      
+      // Create worktreeB
+      const worktreeB = join(repo, 'worktreeB');
+      execFileSync('git', ['worktree', 'add', '--detach', worktreeB], { cwd: repo, stdio: 'ignore' });
+      
+      // Get the common dir
+      const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: worktreeA, encoding: 'utf-8' }).trim();
+      const recoveryRoot = join(repo, commonDir, 'omx-submodule-recovery');
+      
+      // Ensure recovery root directory exists
+      await fsPromises.mkdir(recoveryRoot, { recursive: true });
+      
+      // Create a legacy array-format recovery journal for worktreeA
+      // This simulates a legacy journal from before the worktreePath field was added
+      const recoveryDir = await mkdtemp(join(recoveryRoot, 'worktree-'));
+      const legacyJournal = [
+        {
+          original: join(worktreeA, 'submodule'),
+          saved: join(recoveryDir, 'checkouts', 'submodule'),
+          checkout: true,
+        },
+      ];
+      await writeFile(join(recoveryDir, 'recovery.json'), JSON.stringify(legacyJournal));
+      
+      // Create the saved directory so the journal appears to have content
+      await fsPromises.mkdir(join(recoveryDir, 'checkouts', 'submodule'), { recursive: true });
+      await writeFile(join(recoveryDir, 'checkouts', 'submodule', 'test.txt'), 'test content');
+      
+      // Replay recovery from worktreeB should succeed and skip the legacy journal
+      // since its destinations are in worktreeA, not worktreeB
+      const result = await replaySubmoduleRecovery(worktreeB, repo);
+      assert.equal(result, true, 'replaySubmoduleRecovery should succeed for worktreeB');
+      
+      // The legacy journal should still exist (not replayed)
+      assert.equal(existsSync(recoveryDir), true, 'legacy recovery journal should not be deleted');
+      assert.equal(existsSync(join(recoveryDir, 'recovery.json')), true, 'legacy recovery.json should not be deleted');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('replays legacy recovery journal when it belongs to current worktree', async () => {
+    const repo = await initRepo();
+    try {
+      // Create worktree
+      const worktree = join(repo, 'worktree');
+      execFileSync('git', ['worktree', 'add', '--detach', worktree], { cwd: repo, stdio: 'ignore' });
+      
+      // Get the common dir
+      const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: worktree, encoding: 'utf-8' }).trim();
+      const recoveryRoot = join(repo, commonDir, 'omx-submodule-recovery');
+      
+      // Ensure recovery root directory exists
+      await fsPromises.mkdir(recoveryRoot, { recursive: true });
+      
+      // Create a legacy array-format recovery journal for this worktree
+      const recoveryDir = await mkdtemp(join(recoveryRoot, 'worktree-'));
+      const legacyJournal = [
+        {
+          original: join(worktree, 'submodule'),
+          saved: join(recoveryDir, 'checkouts', 'submodule'),
+          checkout: true,
+        },
+      ];
+      await writeFile(join(recoveryDir, 'recovery.json'), JSON.stringify(legacyJournal));
+      
+      // Create the saved directory
+      await fsPromises.mkdir(join(recoveryDir, 'checkouts', 'submodule'), { recursive: true });
+      await writeFile(join(recoveryDir, 'checkouts', 'submodule', 'test.txt'), 'test content');
+      
+      // Replay recovery should succeed (return true, meaning no unresolved recovery)
+      const result = await replaySubmoduleRecovery(worktree, repo);
+      assert.equal(result, true, 'replaySubmoduleRecovery should succeed for legacy journal belonging to this worktree');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
     }
   });
 });

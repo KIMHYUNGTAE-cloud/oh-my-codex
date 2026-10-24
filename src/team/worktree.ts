@@ -613,6 +613,18 @@ export async function replaySubmoduleRecovery(worktreePath: string, repoRoot: st
         continue; // Skip journals from other worktrees
       }
       
+      // For legacy journals (array format without worktreePath), infer ownership from move destinations
+      if (!storedWorktreePath && Array.isArray(parsed)) {
+        const resolvedWorktreePath = resolve(worktreePath);
+        const destinationInWorktree = moves.some(move => {
+          const originalPath = resolve(move.original);
+          return originalPath.startsWith(resolvedWorktreePath + '/');
+        });
+        if (!destinationInWorktree) {
+          continue; // Legacy journal belongs to another worktree
+        }
+      }
+      
       let anyMovesFailed = false;
       // Restore all submodules from this recovery directory
       for (const move of [...moves].reverse()) {
