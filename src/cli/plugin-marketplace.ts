@@ -1303,14 +1303,17 @@ async function isLivePinOwnerAlive(record: OmxPluginCacheLivePinRecord): Promise
 }
 
 async function hasLiveSessionPinRecord(
-	pluginRoot: string,
+	versionDir: string,
 	version: string,
 	ownerPid: number,
 	sessionHash: string,
 ): Promise<boolean> {
 	let pinDirectoryRef: DirectoryRef | null = null;
 	try {
-		pinDirectoryRef = await openOmxPluginCacheLivePinStateDirectory(pluginRoot, version);
+		// versionDir is the version-specific cache directory (e.g., /plugin/v1.0)
+		// Get the cache base by taking the parent directory
+		const cacheBase = dirname(versionDir);
+		pinDirectoryRef = await openOmxPluginCacheLivePinStateDirectory(cacheBase, version);
 		if (!pinDirectoryRef) return false;
 		if (await livePinRetirementGateExists(pinDirectoryRef)) return false;
 		for (const entry of await readdir(pinDirectoryRef.scanOperationPath, { withFileTypes: true })) {
