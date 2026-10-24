@@ -1534,9 +1534,8 @@ async function isLivePinnedSnapshot(
 	if (await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent)) return true;
 	if (await isPrePinManagedSnapshot(snapshotRef, version)) return true;
 	// Check the external pin directory
-	const codexHomeDir = codexHome();
-	const cacheBase = omxPluginCacheBase(codexHomeDir);
-	const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
+	// Use the cacheBase from the passed cacheBaseRef instead of re-deriving from codexHome()
+	const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.operationPath, version);
 	let pinDirStats: Stats;
 	try {
 		pinDirStats = await lstat(pinDirPath);

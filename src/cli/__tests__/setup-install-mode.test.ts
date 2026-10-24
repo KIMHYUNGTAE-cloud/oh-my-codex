@@ -1431,13 +1431,18 @@ describe("omx setup install mode behavior", () => {
 				await mkdir(join(dir, "skills"), { recursive: true });
 				await writeFile(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "oh-my-codex", version, skills: "./skills/", hooks: "./hooks/hooks.json" }));
 				await writeFile(join(dir, ".omx-managed"), "fixture\n");
-				if (pinned) await writeFile(join(dir, ".omx-live-pin"), "pinned\n");
+				if (pinned) {
+					// Create pin in external location instead of inside plugin dir
+					const externalPinDir = join(cacheBase, ".omx-pins", version);
+					await mkdir(externalPinDir, { recursive: true });
+					await writeFile(join(externalPinDir, "pinned.json"), JSON.stringify({ version: 1, pid: process.pid, sessionHash: "test" }) + "\n");
+				}
 				await writeBoundCompletionMarker(dir);
 				return dir;
 			};
-			const previous = await seed("0.20.4");
-			const older = await seed("0.20.3");
-			const pinned = await seed("0.20.2", true);
+		const previous = await seed("0.20.4");
+		const older = await seed("0.20.3");
+		const pinned = await seed("0.20.2", true);
 			const foreign = join(cacheBase, "foreign");
 			await mkdir(join(foreign, ".codex-plugin"), { recursive: true });
 			await writeFile(join(foreign, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "foreign-plugin", version: "foreign" }));
