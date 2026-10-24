@@ -1387,7 +1387,6 @@ async function hasLivePinIntent(
 }
 
 async function sweepExpiredOmxPluginCacheLivePinIntents(
-	snapshotRef: DirectoryRef,
 	cacheBaseRef: DirectoryRef,
 	version: string,
 ): Promise<void> {
@@ -1659,7 +1658,6 @@ async function createLivePinRetirementGate(snapshotPath: string, snapshotStats: 
 		}
 		pinDirectoryRef = await openDirectoryRef(pinDirPath);
 		const gateContent = `${JSON.stringify({ version: 1, pid: process.pid, token: randomUUID() })}\n`;
-		const gatePath = join(pinDirectoryRef.operationPath, OMX_PLUGIN_LIVE_PIN_RETIRING_MARKER);
 		await createExclusiveFileChild(pinDirectoryRef, OMX_PLUGIN_LIVE_PIN_RETIRING_MARKER, gateContent);
 		return gateContent;
 	} catch {
@@ -2202,21 +2200,6 @@ export function omxPluginCacheBase(codexHomeDir: string): string {
  */
 function omxPluginCacheLivePinDirectory(cacheBase: string, version: string): string {
 	return join(cacheBase, ".omx-pins", version);
-}
-
-/**
- * Extracts the version from a snapshot path.
- * The version is the directory name, possibly prefixed with a dot and suffixed with .reclaim-*
- */
-function extractVersionFromSnapshotPath(snapshotPath: string, cacheBase: string): string | null {
-	const relativePath = relative(cacheBase, snapshotPath);
-	const basename = relativePath.split(sep)[0];
-	if (!basename) return null;
-	// Remove leading dot and reclaim suffix: .0.21.33.reclaim-123-abc -> 0.21.33
-	let version = basename.startsWith(".") ? basename.slice(1) : basename;
-	const reclaimIndex = version.indexOf(".reclaim-");
-	if (reclaimIndex !== -1) version = version.slice(0, reclaimIndex);
-	return version || null;
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -3722,7 +3705,7 @@ export async function retireUnpinnedManagedSnapshots(
 			if (manifest?.name !== OMX_PLUGIN_NAME || manifest.version !== entry.name) continue;
 			if (!(await hasRegularPublicationMarker(candidateRef.operationPath, ".omx-complete")) || await hasPublicationMarkerEntry(candidateRef.operationPath, ".omx-incomplete")) continue;
 			if (!(await hasRegularPublicationMarker(candidateRef.operationPath, OMX_PLUGIN_MANAGED_MARKER))) continue;
-			await sweepExpiredOmxPluginCacheLivePinIntents(candidateRef, baseRef, entry.name);
+			await sweepExpiredOmxPluginCacheLivePinIntents(baseRef, entry.name);
 			if (entry.name === currentVersion) continue;
 			if (await isLivePinnedSnapshot(candidateRef, baseRef, entry.name)) continue;
 			managed.push({ path: join(cacheBase, entry.name), version: entry.name, mtimeMs: candidateStats.mtimeMs, ref: candidateRef, stats: candidateStats });
