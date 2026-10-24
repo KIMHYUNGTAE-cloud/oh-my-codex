@@ -1433,9 +1433,12 @@ describe("omx setup install mode behavior", () => {
 				await writeFile(join(dir, ".omx-managed"), "fixture\n");
 				if (pinned) {
 					// Create pin in external location instead of inside plugin dir
+					// Use a valid session hash format (64 hex chars)
+					const sessionHash = "a".repeat(64);
 					const externalPinDir = join(cacheBase, ".omx-pins", version);
 					await mkdir(externalPinDir, { recursive: true });
-					await writeFile(join(externalPinDir, "pinned.json"), JSON.stringify({ version: 1, pid: process.pid, sessionHash: "test" }) + "\n");
+					const pinRecord = { version: 1, pid: process.pid, processStartHash: null, sessionHash };
+					await writeFile(join(externalPinDir, `pin-${process.pid}-${sessionHash.slice(0, 24)}-unknown.json`), JSON.stringify(pinRecord) + "\n");
 				}
 				await writeBoundCompletionMarker(dir);
 				return dir;
