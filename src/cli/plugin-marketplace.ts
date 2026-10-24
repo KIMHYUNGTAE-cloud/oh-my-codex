@@ -1406,9 +1406,7 @@ async function sweepExpiredOmxPluginCacheLivePinIntents(
 		await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent);
 		let pinDirectoryRef: DirectoryRef | undefined;
 		try {
-			const codexHomeDir = codexHome();
-			const cacheBase = omxPluginCacheBase(codexHomeDir);
-			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
+			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.path, version);
 			const pinDirStats = await lstat(pinDirPath).catch(() => null);
 			if (!pinDirStats?.isDirectory()) return;
 			pinDirectoryRef = await openDirectoryRef(pinDirPath);
@@ -1469,9 +1467,7 @@ async function sweepExpiredOmxPluginCacheLivePinIntents(
 					))
 				) return;
 				// Remove the now-empty external pin directory
-				const codexHomeDir = codexHome();
-				const cacheBase = omxPluginCacheBase(codexHomeDir);
-				const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
+				const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.path, version);
 				try {
 					await rmdir(pinDirPath).catch(() => undefined);
 				} catch {
@@ -1534,7 +1530,7 @@ async function isLivePinnedSnapshot(
 	if (await isPrePinManagedSnapshot(snapshotRef, version)) return true;
 	// Check the external pin directory
 	// Use the cacheBase from the passed cacheBaseRef instead of re-deriving from codexHome()
-	const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.operationPath, version);
+	const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.path, version);
 	let pinDirStats: Stats;
 	try {
 		pinDirStats = await lstat(pinDirPath);
