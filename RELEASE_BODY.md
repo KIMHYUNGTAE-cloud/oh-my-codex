@@ -1,21 +1,21 @@
-# oh-my-codex 0.21.34
+# oh-my-codex 0.21.35
 
-`0.21.34` is a patch release that preserves worker worktrees when shutdown cannot save work (PR #3896).
+`0.21.35` is a patch release that fixes legacy recovery journal ownership and platform-aware replay logic.
 
-This release fixes an issue where worker worktrees could be deleted during shutdown even when checkpointing or merging failed, or when the working directory contained ignored files. The shutdown process no longer deletes worker worktrees in these failure cases, allowing recovery state to be preserved for retries. Submodules, report provenance, and partial pane/prompt teardown are still handled correctly.
+This release addresses issues introduced in v0.21.34's shutdown preservation (#3896) where legacy recovery journals from other workers could block a healthy worker's shutdown. The fix scopes journal recovery to the owning worktree and enforces platform-aware naming conventions, preventing parent traversal attempts and ensuring module-only replay.
 
 ## Highlights
 
-- **PRESERVATION: Worker worktrees survive shutdown failure (#3896):** When shutdown could not save work (checkpointing failure, merge failure, or ignored files present), the process would still delete worker worktrees, losing recovery state. The fix preserves worktrees in these cases, allowing retries with full state intact. This also resolves issue #3897.
-- **Recovery state retention:** Shutdown failures no longer erase the work that was being preserved; recovery can be attempted on the next run.
-- **Selective teardown (#3896):** Submodules, report provenance, and partial pane/prompt cleanup proceed independently; a failure in one component no longer cascades to worktree deletion.
+- **RESILIENCE: Worktree-scoped journal recovery (#3903):** A pending legacy (array-format) recovery journal owned by another worker no longer blocks a healthy worker's shutdown with `shutdown_worktree_preservation_failed`. This fixes a regression introduced by v0.21.34's shutdown preservation (#3896).
+- **SAFETY: Platform-aware legacy journal ownership (#3904):** Legacy journal names beginning with `".."` are no longer treated as parent traversal attempts. Platform-aware ownership checking prevents cross-worker journal contamination.
+- **MODULE ISOLATION: Modules-only replay (#3904):** Legacy journal replay is now enforced to operate only on modules, preventing accidental state corruption from misconfigured legacy journals.
 
 ## Compatibility
 
-- No breaking API changes; shutdown resilience improvement only.
-- **Team runtime users:** If shutdown failed to save work in earlier versions, worker worktrees were lost. Upgrade to v0.21.34 to preserve recovery state in shutdown failure cases.
-- Existing sessions remain unaffected unless they experienced shutdown failures with ignored files or checkpointing errors.
-- The fix improves robustness without changing the shutdown API contract.
+- No breaking API changes; recovery robustness improvements only.
+- **Team runtime users:** If you experienced recovery journal blocking on shutdown in v0.21.34, this release resolves the issue.
+- Existing sessions with pending legacy recovery journals will be handled correctly by the platform-aware logic.
+- The fix improves legacy recovery robustness without changing the recovery API contract.
 
 ## Known issues
 
@@ -23,9 +23,9 @@ This release fixes an issue where worker worktrees could be deleted during shutd
 
 ## Validation
 
-- Pinned candidate `bc7efc1c1c504b84a28cd4b24c1f3d6af08e6217` passed CI run at 20:16Z on 2026-10-24: 17 checks succeeded, 8 conditional checks skipped, no failures.
+- Pinned candidate `c6a41e75a04a77c7507b5987246abad80029ac9a` passed CI run at 02:17Z on 2026-10-24: 17 checks succeeded, 8 conditional checks skipped, no failures.
 - Both macOS Ralplan preflight security jobs PASSED (not cancelled or failed).
-- All local gates pass: build, typecheck, lint, and team runtime shutdown preservation tests.
+- All local gates pass: build, typecheck, lint, and team runtime legacy recovery tests.
 - All code review findings addressed.
 - Ready for merge and release.
 
@@ -33,13 +33,14 @@ This release fixes an issue where worker worktrees could be deleted during shutd
 
 | PR | Author | Title |
 |---|---|---|
-| [#3896](https://github.com/Yeachan-Heo/oh-my-codex/pull/3896) | @shenyankm | fix(team): preserve worker worktrees when shutdown cannot save work |
+| [#3903](https://github.com/Yeachan-Heo/oh-my-codex/pull/3903) | @shenyankm | fix(team): scope legacy recovery journals to the owning worktree |
+| [#3904](https://github.com/Yeachan-Heo/oh-my-codex/pull/3904) | @Claude Code | fix(team): platform-aware legacy journal ownership and modules-only replay |
 
 ## Contributors
 
-Thanks to @shenyankm for the shutdown preservation fix, and @Claude Code for release validation.
+Thanks to @shenyankm for the legacy journal fix, and @Claude Code for platform-aware ownership and Codex resolution.
 
-**Full Changelog**: [`v0.21.33...v0.21.34`](https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.33...v0.21.34)
+**Full Changelog**: [`v0.21.34...v0.21.35`](https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.21.34...v0.21.35)
 
 —
 *[repo owner's gaebal-gajae (clawdbot) 🦞]*
