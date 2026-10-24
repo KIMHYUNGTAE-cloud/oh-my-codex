@@ -1406,7 +1406,9 @@ async function sweepExpiredOmxPluginCacheLivePinIntents(
 		await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent);
 		let pinDirectoryRef: DirectoryRef | undefined;
 		try {
-			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.operationPath, version);
+			const codexHomeDir = codexHome();
+			const cacheBase = omxPluginCacheBase(codexHomeDir);
+			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
 			const pinDirStats = await lstat(pinDirPath).catch(() => null);
 			if (!pinDirStats?.isDirectory()) return;
 			pinDirectoryRef = await openDirectoryRef(pinDirPath);
