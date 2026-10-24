@@ -1407,9 +1407,7 @@ async function sweepExpiredOmxPluginCacheLivePinIntents(
 		await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent);
 		let pinDirectoryRef: DirectoryRef | undefined;
 		try {
-			const codexHomeDir = codexHome();
-			const cacheBase = omxPluginCacheBase(codexHomeDir);
-			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
+			const pinDirPath = omxPluginCacheLivePinDirectory(cacheBaseRef.operationPath, version);
 			const pinDirStats = await lstat(pinDirPath).catch(() => null);
 			if (!pinDirStats?.isDirectory()) return;
 			pinDirectoryRef = await openDirectoryRef(pinDirPath);
@@ -1643,17 +1641,15 @@ async function livePinRetirementGateExists(pinDirectoryRef: DirectoryRef): Promi
 	}
 }
 
-async function createLivePinRetirementGate(snapshotPath: string, snapshotStats: Stats): Promise<string | null> {
+async function createLivePinRetirementGate(snapshotPath: string, snapshotStats: Stats, version: string): Promise<string | null> {
 	let snapshotRef: DirectoryRef | undefined;
 	let pinDirectoryRef: DirectoryRef | undefined;
 	try {
 		snapshotRef = await openDirectoryRef(snapshotPath);
 		if (!sameFileIdentity(await snapshotRef.handle.stat(), snapshotStats)) return null;
-		// Extract version from snapshot path to access external pin directory
+		// Access external pin directory using the provided version
 		const codexHomeDir = codexHome();
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
-		const version = extractVersionFromSnapshotPath(snapshotPath, cacheBase);
-		if (!version) return null;
 		// Create/access the external pin directory
 		const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
 		try {
@@ -1674,17 +1670,15 @@ async function createLivePinRetirementGate(snapshotPath: string, snapshotStats: 
 	}
 }
 
-async function removeLivePinRetirementGate(snapshotPath: string, snapshotStats: Stats, gateContent: string): Promise<boolean> {
+async function removeLivePinRetirementGate(snapshotPath: string, snapshotStats: Stats, gateContent: string, version: string): Promise<boolean> {
 	let snapshotRef: DirectoryRef | undefined;
 	let pinDirectoryRef: DirectoryRef | undefined;
 	try {
 		snapshotRef = await openDirectoryRef(snapshotPath);
 		if (!sameFileIdentity(await snapshotRef.handle.stat(), snapshotStats)) return false;
-		// Extract version from snapshot path to access external pin directory
+		// Access external pin directory using the provided version
 		const codexHomeDir = codexHome();
 		const cacheBase = omxPluginCacheBase(codexHomeDir);
-		const version = extractVersionFromSnapshotPath(snapshotPath, cacheBase);
-		if (!version) return false;
 		// Access the external pin directory
 		const pinDirPath = omxPluginCacheLivePinDirectory(cacheBase, version);
 		const pinDirStats = await lstat(pinDirPath).catch(() => null);
@@ -2540,7 +2534,7 @@ export async function removeChildIfIdentity(
 					if (!currentQuarantineStats || !sameFileIdentity(currentQuarantineStats, quarantineStats)) return false;
 					if (
 						retirementGateContent &&
-						!(await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent))
+						!(await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent, options.expectedManagedVersion!))
 					)
 						return false;
 					try {
@@ -2619,7 +2613,7 @@ export async function removeChildIfIdentity(
 					options.preservedPaths?.push(join(cacheBaseRef.path, restored ? childName : quarantineName));
 					return false;
 				}
-				const retirementGateContent = await createLivePinRetirementGate(quarantinePath, quarantineStats);
+				const retirementGateContent = await createLivePinRetirementGate(quarantinePath, quarantineStats, options.expectedManagedVersion!);
 				if (!retirementGateContent) {
 					options.preservedPaths?.push(join(cacheBaseRef.path, quarantineName));
 					return false;
@@ -2628,7 +2622,7 @@ export async function removeChildIfIdentity(
 				if (!quarantineState.owned || quarantineState.livePin) {
 					const restored = quarantineState.livePin && (await restoreQuarantinedSnapshot(retirementGateContent));
 					if (!quarantineState.livePin) {
-						await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent);
+						await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent, options.expectedManagedVersion!);
 					}
 					options.preservedPaths?.push(join(cacheBaseRef.path, restored ? childName : quarantineName));
 					return false;
@@ -2664,10 +2658,14 @@ export async function removeChildIfIdentity(
 						return state.owned && !state.livePin;
 					},
 				});
+				if (removed) {
+					// After successful deletion, clean up the external retirement gate
+					await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent, options.expectedManagedVersion!).catch(() => undefined);
+				}
 				if (!removed && preservationNeeded) {
 					const restored = livePinAtDestructiveCheck && (await restoreQuarantinedSnapshot(retirementGateContent));
 					if (!livePinAtDestructiveCheck) {
-						await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent);
+						await removeLivePinRetirementGate(quarantinePath, quarantineStats, retirementGateContent, options.expectedManagedVersion!);
 					}
 					options.preservedPaths?.push(join(cacheBaseRef.path, restored ? childName : quarantineName));
 				}

@@ -268,10 +268,10 @@ describe("issue 3790 live plugin cache pins", () => {
 				);
 				assert.equal(materialized.status, "materialized");
 				const cacheDir = materialized.cacheDir!;
-				const markerDir = join(cacheDir, ".omx-live-pin");
+				const externalPinDir = getExternalLivePinDirectory(codexHomeDir, materialized.version!);
 				const launcherPath = join(cacheDir, "hooks", "omx-command.json");
 				const launcherContent = await readFile(launcherPath, "utf-8");
-				await assert.rejects(lstat(markerDir), { code: "ENOENT" });
+				await assert.rejects(lstat(externalPinDir), { code: "ENOENT" });
 
 				const hookResult = spawnSync(
 					process.execPath,
@@ -293,12 +293,12 @@ describe("issue 3790 live plugin cache pins", () => {
 					0,
 					hookResult.stderr || hookResult.stdout,
 				);
-				const markerStats = await lstat(markerDir);
+				const markerStats = await lstat(externalPinDir);
 				assert.equal(markerStats.isDirectory(), true);
-				const entries = await readdir(markerDir);
+				const entries = await readdir(externalPinDir);
 				assert.equal(entries.length, 1);
 				const pin = JSON.parse(
-					await readFile(join(markerDir, entries[0]!), "utf-8"),
+					await readFile(join(externalPinDir, entries[0]!), "utf-8"),
 				) as {
 					pid: number;
 					sessionHash: string;
@@ -337,7 +337,7 @@ describe("issue 3790 live plugin cache pins", () => {
 				assert.equal(alreadyPinnedResult.status, 0, alreadyPinnedResult.stderr || alreadyPinnedResult.stdout);
 				assert.equal(await readFile(helperCalls, "utf-8"), "called\n");
 				await writeFile(launcherPath, launcherContent);
-				await rm(join(markerDir, entries[0]!), { force: true });
+				await rm(join(externalPinDir, entries[0]!), { force: true });
 				const retryResult = spawnSync(
 					process.execPath,
 					[join(cacheDir, "hooks", "codex-native-hook.mjs")],
@@ -354,7 +354,7 @@ describe("issue 3790 live plugin cache pins", () => {
 					},
 				);
 				assert.equal(retryResult.status, 0, retryResult.stderr || retryResult.stdout);
-				assert.equal((await readdir(markerDir)).length, 1);
+				assert.equal((await readdir(externalPinDir)).length, 1);
 			});
 		} finally {
 			await rm(wd, { recursive: true, force: true });
@@ -400,6 +400,7 @@ describe("issue 3790 live plugin cache pins", () => {
 				const published = await materializePackagedOmxPluginCache(codexHomeDir, packaged);
 				assert.equal(published.status, "materialized");
 				const cacheDir = published.cacheDir!;
+				const publishedVersion = published.version!;
 				await writeFile(join(cacheDir, "hooks", "omx-command.json"), "invalid launcher\n");
 
 				const cliPath = join(packageRoot, "dist", "cli", "omx.js");
@@ -440,10 +441,10 @@ describe("issue 3790 live plugin cache pins", () => {
 					},
 				);
 				assert.equal(hookResult.status, 0, hookResult.stderr || hookResult.stdout);
-				const markerDir = join(cacheDir, ".omx-live-pin");
-				const entries = await readdir(markerDir);
+			const externalPinDir = getExternalLivePinDirectory(codexHomeDir, publishedVersion);
+			const entries = await readdir(externalPinDir);
 				assert.equal(entries.length, 1);
-				const pin = JSON.parse(await readFile(join(markerDir, entries[0]!), "utf-8")) as {
+				const pin = JSON.parse(await readFile(join(externalPinDir, entries[0]!), "utf-8")) as {
 					pid: number;
 					sessionHash: string;
 				};
@@ -665,7 +666,8 @@ setInterval(() => {}, 60_000);
 		const wd = await mkdtemp(join(tmpdir(), "omx-3790-quarantine-pin-race-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
-				const pluginRoot = await seedManagedSnapshot(codexHomeDir, "0.20.0");
+				const pluginVersion = "0.20.0";
+				const pluginRoot = await seedManagedSnapshot(codexHomeDir, pluginVersion);
 				const quarantinePath = join(wd, "quarantined-snapshot");
 				const preloadPath = join(wd, "rename-before-pin-write.mjs");
 				await writeFile(preloadPath, `
@@ -674,7 +676,7 @@ import { syncBuiltinESMExports } from "node:module";
 const originalWriteFileSync = fs.writeFileSync;
 let renamed = false;
 fs.writeFileSync = function (path, ...args) {
-	if (!renamed && typeof path === "string" && path.includes("/.omx-live-pin/.stage-")) {
+	if (!renamed && typeof path === "string" && path.includes(".omx-pins/") && path.includes("/.stage-")) {
 		fs.renameSync(process.env.OMX_TEST_PLUGIN_ROOT, process.env.OMX_TEST_QUARANTINE);
 		renamed = true;
 	}
@@ -708,7 +710,7 @@ syncBuiltinESMExports();
 				);
 				assert.equal(hookResult.status, 0, hookResult.stderr || hookResult.stdout);
 				await assert.rejects(lstat(pluginRoot), { code: "ENOENT" });
-				assert.deepEqual(await readdir(join(quarantinePath, ".omx-live-pin")), []);
+				assert.deepEqual(await readdir(getExternalLivePinDirectory(codexHomeDir, pluginVersion)), []);
 			});
 		} finally {
 			await rm(wd, { recursive: true, force: true });
@@ -830,7 +832,7 @@ import { syncBuiltinESMExports } from "node:module";
 const originalWriteFileSync = fs.writeFileSync;
 let paused = false;
 fs.writeFileSync = function (path, ...args) {
-	if (!paused && typeof path === "string" && path.includes("/.omx-live-pin/.stage-")) {
+	if (!paused && typeof path === "string" && path.includes(".omx-pins/") && path.includes("/.stage-")) {
 		paused = true;
 		originalWriteFileSync.call(this, process.env.OMX_TEST_PIN_READY, "ready\\n");
 		const wait = new Int32Array(new SharedArrayBuffer(4));
@@ -1090,8 +1092,8 @@ syncBuiltinESMExports();
 				const snapshots = await Promise.all(
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 
 				const retired = await retireUnpinnedManagedSnapshots(codexHomeDir, "0.20.3");
 
@@ -1106,15 +1108,15 @@ syncBuiltinESMExports();
 		}
 	});
 
-	it("reclaims an abandoned empty live-pin directory after its initialization lease", async () => {
+	it("reclaims an abandoned empty live-pin directory after its initialization lease expires", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-3790-expired-empty-pin-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
 				const snapshots = await Promise.all(
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				const expiredAt = new Date(Date.now() - 6 * 60 * 1000);
 				await utimes(pinDirectory, expiredAt, expiredAt);
 
@@ -1226,8 +1228,8 @@ syncBuiltinESMExports();
 					["0.20.0", "0.20.1", "0.20.2"].map((version) => seedManagedSnapshot(codexHomeDir, version)),
 				);
 				const sessionHash = createHash("sha256").update("expired-pending-session").digest("hex");
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
-				await mkdir(pinDirectory);
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
+				await mkdir(pinDirectory, { recursive: true });
 				assert.equal(await registerOmxPluginCacheLivePin(snapshots[0]!, "pending-marker-live-session", process.pid), true);
 				const pendingPath = join(pinDirectory, `.pending-${sessionHash}.json`);
 				await writeFile(pendingPath, `${JSON.stringify({ version: 1, sessionHash })}\n`);
@@ -1296,7 +1298,7 @@ syncBuiltinESMExports();
 					);
 					const content = `${JSON.stringify({ version: 1, cacheVersion: version, sessionHash })}\n`;
 					const snapshot = snapshots[version === "0.20.1" ? 1 : 2]!;
-					const pinDirectory = join(snapshot, ".omx-live-pin");
+					const pinDirectory = getExternalLivePinDirectory(codexHomeDir, version);
 					const pendingPinPath = join(pinDirectory, `.pending-${sessionHash}.json`);
 					const pinStagePath = join(pinDirectory, `.stage-pending-${sessionHash}-99999-abandoned`);
 					const pinContent = `${JSON.stringify({ version: 1, sessionHash })}\n`;
@@ -1324,7 +1326,7 @@ syncBuiltinESMExports();
 						lstat(join(cacheBase, `.stage-omx-live-pin-intent-${versionHash}-${sessionHash}-99999-abandoned`)),
 						{ code: "ENOENT" },
 					);
-					const pinDirectory = join(snapshots[version === "0.20.1" ? 1 : 2]!, ".omx-live-pin");
+					const pinDirectory = getExternalLivePinDirectory(codexHomeDir, version);
 					await assert.rejects(lstat(join(pinDirectory, `.pending-${sessionHash}.json`)), { code: "ENOENT" });
 					await assert.rejects(lstat(join(pinDirectory, `.stage-pending-${sessionHash}-99999-abandoned`)), { code: "ENOENT" });
 					await lstat(snapshots[version === "0.20.1" ? 1 : 2]!);
@@ -1353,7 +1355,7 @@ syncBuiltinESMExports();
 
 				await assert.rejects(lstat(lock.path), { code: "ENOENT" });
 				await assert.rejects(lstat(lock.stagePath), { code: "ENOENT" });
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
 				const sessionHash = createHash("sha256").update("dead-lock-recovery-session").digest("hex");
 				const records = await Promise.all(
 					(await readdir(pinDirectory)).map(
@@ -2069,7 +2071,7 @@ syncBuiltinESMExports();
 				});
 
 				assert.equal(hookResult.status, 0, hookResult.stderr || hookResult.stdout);
-				await assert.rejects(lstat(join(pluginRoot, ".omx-live-pin")), { code: "ENOENT" });
+				await assert.rejects(lstat(getExternalLivePinDirectory(codexHomeDir, "0.20.0")), { code: "ENOENT" });
 				await assert.rejects(
 					lstat(livePinIntentPath(codexHomeDir, "0.20.0", "omx-doctor-plugin-hook-smoke")),
 					{ code: "ENOENT" },
@@ -2131,7 +2133,7 @@ process.stdout.write("{}\\n");
 				);
 				assert.equal(hookResult.status, 0, hookResult.stderr || hookResult.stdout);
 				assert.deepEqual(JSON.parse(await readFile(pinStatePath, "utf-8")), { pending: null, required: null });
-				await assert.rejects(lstat(join(pluginRoot, ".omx-live-pin")), { code: "ENOENT" });
+				await assert.rejects(lstat(getExternalLivePinDirectory(codexHomeDir, "0.20.0")), { code: "ENOENT" });
 			});
 		} finally {
 			await rm(wd, { recursive: true, force: true });
@@ -2296,7 +2298,7 @@ process.stdout.write("{}\\n");
 				assert.match(blocked.reason ?? "", /pinned by a live Codex session/);
 				assert.equal(JSON.parse(await readFile(manifestPath, "utf-8")).version, "corrupted-version");
 
-				await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
+				await rm(getExternalLivePinDirectory(codexHomeDir, expectedVersion), { recursive: true, force: true });
 				const repaired = await materializePackagedOmxPluginCache(codexHomeDir, packaged, { repairCache: true });
 				assert.equal(repaired.status, "materialized", JSON.stringify(repaired));
 				assert.equal(repaired.version, expectedVersion);
@@ -2363,7 +2365,7 @@ process.stdout.write("{}\\n");
 				const sessionId = "resumed-session";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "000000000000000000000000";
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
 				await mkdir(pinDirectory, { recursive: true });
 				await writeFile(
 					join(pinDirectory, "stale-reused-pid.json"),
@@ -2434,7 +2436,7 @@ process.stdout.write("{}\\n");
 	});
 
 	it("refreshes a resumed SessionStart pin when its prior process identity is stale", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-3790-resumed-session-pin-"));
+		const wd = await mkdtemp(join(tmpdir(), "omx-3790-stale-lease-hook-pin-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
 				const snapshots = await Promise.all(
@@ -2443,7 +2445,7 @@ process.stdout.write("{}\\n");
 				const sessionId = "resumed-session";
 				const sessionHash = createHash("sha256").update(sessionId).digest("hex");
 				const staleProcessStartHash = "000000000000000000000000";
-				const pinDirectory = join(snapshots[0]!, ".omx-live-pin");
+				const pinDirectory = getExternalLivePinDirectory(codexHomeDir, "0.20.0");
 				await mkdir(pinDirectory, { recursive: true });
 				await writeFile(
 					join(pinDirectory, "stale-reused-pid.json"),

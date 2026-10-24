@@ -536,6 +536,7 @@ function livePinDirectory(pluginRoot) {
     }
     // Use external pin directory location instead of inside the plugin root
     const pinDir = externalLivePinDirectory(cacheBase, version);
+    return { path: pinDir, pluginRoot: absoluteRoot, version, cacheBase, rootDev: rootStats.dev, rootIno: rootStats.ino, rootFd };
   } catch (error) {
     closeRoot();
     throw error;
