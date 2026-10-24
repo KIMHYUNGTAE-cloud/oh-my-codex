@@ -43,6 +43,7 @@ import {
 	resolvePackagedOmxMarketplace,
 	computeOmxPluginCacheClaimDigest,
 	setPluginCacheMutationHooksForTest,
+	omxPluginCacheBase,
 } from "../plugin-marketplace.js";
 import {
 	buildManagedCodexHookTrustState,
@@ -1555,7 +1556,11 @@ describe("omx setup install mode behavior", () => {
 					assert.match(pinnedOutput, /close that session before repairing it/);
 					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, "/stale/node");
 
-					await rm(join(cacheDir, ".omx-live-pin"), { recursive: true, force: true });
+					// Remove the external pin directory instead of the internal one
+					const cacheBase = omxPluginCacheBase(codexHomeDir);
+					const version = basename(cacheDir);
+					const externalPinDir = join(cacheBase, ".omx-pins", version);
+					await rm(externalPinDir, { recursive: true, force: true });
 					const repairedOutput = await captureConsoleOutput(async () => {
 						await setup({
 							scope: "user",
@@ -1572,7 +1577,8 @@ describe("omx setup install mode behavior", () => {
 					const repaired = await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace);
 					assert.equal(repaired.status, "unchanged");
 					assert.equal((JSON.parse(await readFile(launcherPath, "utf-8")) as { command: string }).command, process.execPath);
-					await assert.rejects(lstat(join(cacheDir, ".omx-live-pin")), { code: "ENOENT" });
+					// External pin directory should no longer exist after removal
+					await assert.rejects(lstat(externalPinDir), { code: "ENOENT" });
 
 					await rm(join(cacheDir, ".omx-managed"), { force: true });
 					const unverifiedDryRun = await materializePackagedOmxPluginCache(
