@@ -66,9 +66,13 @@ const TEAM_MODE_PLUGIN_SKILL_NAMES = new Set(["team", "worker"]);
  * We use the parent directory (plugin base) as the key, along with the version.
  * The pluginRoot must be canonicalized (realpath) to ensure consistency across symlinks.
  */
-function omxPluginCacheLivePinStatePath(canonicalPluginRoot: string, version: string): string {
-	const canonicalPluginBase = dirname(canonicalPluginRoot); // Remove version component to get stable plugin base
-	const rootHash = createHash("sha256").update(canonicalPluginBase).digest("hex").slice(0, 16);
+/**
+ * Compute the state path for a plugin version's live pin directory.
+ * The key is derived from the STABLE cache base (plugin root) and version,
+ * not from the snapshot's current path, to handle quarantine/rename operations.
+ */
+function omxPluginCacheLivePinStatePath(canonicalCacheBase: string, version: string): string {
+	const rootHash = createHash("sha256").update(canonicalCacheBase).digest("hex").slice(0, 16);
 	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
 	return join(omxPluginCacheLivePinDir(), `${rootHash}-${versionHash}`);
 }
@@ -76,15 +80,16 @@ function omxPluginCacheLivePinStatePath(canonicalPluginRoot: string, version: st
 /**
  * Open or create the OMX-owned live pin state directory.
  * This directory is outside the plugin cache to avoid invalidating hook approvals.
+ * @param cacheBase The canonical plugin cache base directory (e.g., ~/.codex/.../marketplace/plugin)
  */
 async function openOrCreateOmxPluginCacheLivePinStateDirectory(
-	pluginRoot: string,
+	cacheBase: string,
 	version: string,
 ): Promise<DirectoryRef | null> {
 	try {
-		// Canonicalize the plugin root to ensure consistent hashing across symlinks
-		const canonicalPluginRoot = await realpath(pluginRoot).catch(() => pluginRoot);
-		const statePath = omxPluginCacheLivePinStatePath(canonicalPluginRoot, version);
+		// Canonicalize the cache base to ensure consistent hashing across symlinks
+		const canonicalCacheBase = await realpath(cacheBase).catch(() => cacheBase);
+		const statePath = omxPluginCacheLivePinStatePath(canonicalCacheBase, version);
 		// Create parent directories and the pin directory
 		await mkdir(statePath, { recursive: true });
 		// Open and return the directory reference
@@ -96,15 +101,16 @@ async function openOrCreateOmxPluginCacheLivePinStateDirectory(
 
 /**
  * Open the external state directory for reading live pin records.
+ * @param cacheBase The canonical plugin cache base directory (e.g., ~/.codex/.../marketplace/plugin)
  */
 async function openOmxPluginCacheLivePinStateDirectory(
-	pluginRoot: string,
+	cacheBase: string,
 	version: string,
 ): Promise<DirectoryRef | null> {
 	try {
-		// Canonicalize the plugin root to ensure consistent hashing across symlinks
-		const canonicalPluginRoot = await realpath(pluginRoot).catch(() => pluginRoot);
-		const statePath = omxPluginCacheLivePinStatePath(canonicalPluginRoot, version);
+		// Canonicalize the cache base to ensure consistent hashing across symlinks
+		const canonicalCacheBase = await realpath(cacheBase).catch(() => cacheBase);
+		const statePath = omxPluginCacheLivePinStatePath(canonicalCacheBase, version);
 		return await openDirectoryRef(statePath);
 	} catch (error) {
 		return null;
@@ -1565,8 +1571,9 @@ async function isLivePinnedSnapshot(
 	if (await hasLivePinIntent(cacheBaseRef, version, mutationLockContent, intentLockContent)) return true;
 	if (await isPrePinManagedSnapshot(snapshotRef, version)) return true;
 	// Check for live pins in the external state directory
+	// Use cacheBaseRef (stable plugin cache base) instead of snapshotRef.path (which may change on quarantine)
 	try {
-		const externalPinDir = await openOmxPluginCacheLivePinStateDirectory(snapshotRef.path, version);
+		const externalPinDir = await openOmxPluginCacheLivePinStateDirectory(cacheBaseRef.path, version);
 		if (externalPinDir) {
 			await externalPinDir.handle.close().catch(() => undefined);
 			return true;

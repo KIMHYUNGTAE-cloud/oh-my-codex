@@ -109,17 +109,19 @@ function livePinIntentPath(codexHomeDir: string, version: string, sessionId: str
 	return join(omxPluginCacheBase(codexHomeDir), `.omx-live-pin-intent-${versionHash}-${sessionHash}.json`);
 }
 
-function omxPluginCacheLivePinStateDirectory(codexHomeDir: string, pluginRoot: string, version: string): string {
+function omxPluginCacheLivePinStateDirectory(codexHomeDir: string, cacheDir: string, version: string): string {
 	// This should match the logic in the CLI's omxPluginCacheLivePinStatePath function
+	// The cache dir is the version-specific directory (e.g., ~/.codex/.../marketplace/plugin/v1.0)
+	// We need to extract the plugin base (parent directory) and canonicalize it
 	// Must canonicalize paths to match hook behavior (tmpdir on macOS has /var <-> /private/var symlink)
-	let canonicalPluginRoot = pluginRoot;
+	let canonicalCacheDir = cacheDir;
 	try {
-		canonicalPluginRoot = realpathSync(pluginRoot);
+		canonicalCacheDir = realpathSync(cacheDir);
 	} catch {
-		// If realpath fails, fall back to pluginRoot
+		// If realpath fails, fall back to cacheDir
 	}
-	const pluginBase = dirname(canonicalPluginRoot);
-	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
+	const canonicalPluginBase = dirname(canonicalCacheDir); // Extract plugin base from version dir
+	const rootHash = createHash("sha256").update(canonicalPluginBase).digest("hex").slice(0, 16);
 	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
 	return join(codexHomeDir, ".omx", "plugin-cache-live-pins", `${rootHash}-${versionHash}`);
 }

@@ -759,9 +759,11 @@ async function removeExternalOmxPluginCacheLivePins(codexHomeDir: string): Promi
 async function createExternalOmxPluginCacheLivePin(cacheDir: string, sessionId: string, codexHomeDir: string): Promise<void> {
 	// Create an external live pin in the correct location for testing
 	// The external pins are stored in: ~/.codex/.omx/plugin-cache-live-pins/${rootHash}-${versionHash}
+	// cacheDir should be the version-specific cache directory (e.g., ~/.codex/.../marketplace/plugin/v1.0)
 	const canonicalCacheDir = await realpath(cacheDir).catch(() => cacheDir);
 	const pluginBase = dirname(canonicalCacheDir);
 	const version = basename(canonicalCacheDir);
+	
 	const rootHash = createHash("sha256").update(pluginBase).digest("hex").slice(0, 16);
 	const versionHash = createHash("sha256").update(version).digest("hex").slice(0, 24);
 	const externalPinDir = join(codexHomeDir, ".omx", "plugin-cache-live-pins", `${rootHash}-${versionHash}`);
@@ -775,8 +777,7 @@ async function createExternalOmxPluginCacheLivePin(cacheDir: string, sessionId: 
 	};
 	const pinFileName = `pin-${process.pid}-${sessionHash.slice(0, 24)}-unknown.json`;
 	const pinFilePath = join(externalPinDir, pinFileName);
-	await writeFile(pinFilePath, `${JSON.stringify(pinRecord)}
-`);
+	await writeFile(pinFilePath, `${JSON.stringify(pinRecord)}\n`);
 }
 
 async function packagedPluginCacheDir(codexHomeDir: string): Promise<string> {
@@ -1656,17 +1657,19 @@ describe("omx setup install mode behavior", () => {
 
 								// Setup: inject a hook that creates a live pin AFTER inspection but BEFORE actual removal
 								let hookCalled = false;
-								const originalRestore = setPluginCacheMutationHooksForTest({
-									beforeRemoveSyscall: async (path: string) => {
-										// Simulate late-pin: create a live pin after the initial checks
-										// Run the hook only once, the first time it's called
-										if (!hookCalled) {
-											hookCalled = true;
-											// Create the pin in the external directory
-											await createExternalOmxPluginCacheLivePin(path, "test-late-pin-session", codexHomeDir2a);
-										}
-									},
-								});
+						const originalRestore = setPluginCacheMutationHooksForTest({
+							beforeRemoveSyscall: async (path: string) => {
+								// Simulate late-pin: create a live pin after the initial checks
+								// Run the hook only once, the first time it's called
+								if (!hookCalled) {
+									hookCalled = true;
+									// Create the pin in the external directory
+									// Use cacheDir (the version directory), not path (the quarantine path),
+									// so the helper can compute the correct stable pin directory key
+									await createExternalOmxPluginCacheLivePin(cacheDir, "test-late-pin-session", codexHomeDir2a);
+							}
+						},
+					});
 
 								try {
 									const latePinResult = await materializePackagedOmxPluginCache(
