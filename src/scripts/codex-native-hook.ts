@@ -90,6 +90,7 @@ import {
 import { parseTeamNoticeLedgerPrompt, reconcileTeamNoticeLedger } from "../team/notice-ledger.js";
 import {
   canonicalizeComparablePath,
+  omxLogsDir,
   omxNotepadPath,
   resolveProjectMemoryPath,
   sameFilePath,
@@ -23136,7 +23137,7 @@ async function logNativeHookCliError(
   payload: CodexHookPayload = {},
   details: Record<string, unknown> = {},
 ): Promise<void> {
-  const logsDir = join(cwd || process.cwd(), ".omx", "logs");
+  const logsDir = omxLogsDir(cwd);
   await mkdir(logsDir, { recursive: true }).catch(() => {});
   const logPath = join(logsDir, `native-hook-${new Date().toISOString().split("T")[0]}.jsonl`);
   await appendFile(

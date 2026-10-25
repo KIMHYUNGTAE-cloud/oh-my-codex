@@ -3449,8 +3449,203 @@ describe("codex native hook dispatch", { concurrency: false }, () => {
 
       const logFiles = await readdir(join(cwd, ".omx", "logs"));
       assert.equal(logFiles.some((name) => /^native-hook-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)), true);
+      const logName = logFiles.find((name) => /^native-hook-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
+      assert.notEqual(logName, undefined);
+      const [record] = (await readFile(join(cwd, ".omx", "logs", logName ?? ""), "utf-8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.equal(typeof record?.timestamp, "string");
+      assert.equal(record?.type, "native_hook_dispatch_error");
+      assert.equal(record?.hook_event_name, "Stop");
+      assert.equal(record?.session_id, "sess-cli-stop-dispatch-silent");
+      assert.equal(record?.thread_id, "thread-cli-stop-dispatch-silent");
+      assert.equal(record?.turn_id, "turn-cli-stop-dispatch-silent");
+      assert.equal(record?.error, "test-induced Stop dispatch failure");
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("routes native-hook CLI error logs through OMX_ROOT", async () => {
+    const project = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-log-project-"));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-log-runtime-"));
+    const projectLogsDir = join(project, ".omx", "logs");
+    const sentinelPath = join(projectLogsDir, "sentinel.jsonl");
+    const sentinel = "preserve this project log\n";
+    try {
+      await mkdir(projectLogsDir, { recursive: true });
+      await writeFile(sentinelPath, sentinel);
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        OMX_ROOT: runtimeRoot,
+        NODE_ENV: "test",
+        OMX_NATIVE_HOOK_TEST_THROW_DISPATCH: "1",
+      };
+      delete env.OMX_STATE_ROOT;
+      delete env.OMX_TEAM_STATE_ROOT;
+      delete env.OMX_TEAM_ROOT;
+      delete env.OMX_PLUGIN_ROOT;
+      delete env.OMX_PLUGIN_CACHE_PIN_PENDING;
+      delete env.OMX_PLUGIN_CACHE_PIN_REQUIRED;
+
+      const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+        cwd: project,
+        input: JSON.stringify({ hook_event_name: "Stop", cwd: project }),
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+      });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stderr, "");
+      const output = parseSingleJsonStdout(result.stdout);
+      assert.equal(output.decision, "block");
+      assert.equal(output.stopReason, "native_stop_dispatch_failure");
+      assert.equal(existsSync(join(runtimeRoot, ".omx", "logs")), true);
+      const runtimeLogsDir = join(runtimeRoot, ".omx", "logs");
+      const logFiles = await readdir(runtimeLogsDir);
+      assert.equal(logFiles.length, 1);
+      assert.match(logFiles[0] ?? "", /^native-hook-\d{4}-\d{2}-\d{2}\.jsonl$/);
+      const [record] = (await readFile(join(runtimeLogsDir, logFiles[0] ?? ""), "utf-8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.deepEqual(
+        {
+          type: record?.type,
+          hook_event_name: record?.hook_event_name,
+          error: record?.error,
+        },
+        {
+          type: "native_hook_dispatch_error",
+          hook_event_name: "Stop",
+          error: "test-induced dispatch failure",
+        },
+      );
+      assert.equal(await readFile(sentinelPath, "utf-8"), sentinel);
+      assert.deepEqual(await readdir(projectLogsDir), ["sentinel.jsonl"]);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("honors OMX_STATE_ROOT, OMX_ROOT precedence, and the cwd default for native-hook logs", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "omx-native-hook-state-root-"));
+    const unusedStateRoot = await mkdtemp(join(tmpdir(), "omx-native-hook-unused-state-root-"));
+    const omxRoot = await mkdtemp(join(tmpdir(), "omx-native-hook-root-"));
+    const baseEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      NODE_ENV: "test",
+      OMX_NATIVE_HOOK_TEST_THROW_DISPATCH: "1",
+    };
+    delete baseEnv.OMX_ROOT;
+    delete baseEnv.OMX_STATE_ROOT;
+    delete baseEnv.OMX_TEAM_STATE_ROOT;
+    delete baseEnv.OMX_TEAM_ROOT;
+    delete baseEnv.OMX_PLUGIN_ROOT;
+    delete baseEnv.OMX_PLUGIN_CACHE_PIN_PENDING;
+    delete baseEnv.OMX_PLUGIN_CACHE_PIN_REQUIRED;
+    const cases: Array<{
+      name: string;
+      expectedRoot?: string;
+      unusedRoot?: string;
+      overrides: NodeJS.ProcessEnv;
+    }> = [
+      {
+        name: "OMX_STATE_ROOT alone",
+        expectedRoot: stateRoot,
+        overrides: { OMX_STATE_ROOT: stateRoot },
+      },
+      {
+        name: "OMX_ROOT precedence",
+        expectedRoot: omxRoot,
+        unusedRoot: unusedStateRoot,
+        overrides: { OMX_ROOT: omxRoot, OMX_STATE_ROOT: unusedStateRoot },
+      },
+      { name: "cwd default", overrides: {} },
+    ];
+
+    try {
+      for (const scenario of cases) {
+        const project = await mkdtemp(join(tmpdir(), "omx-native-hook-root-contract-"));
+        try {
+          const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+            cwd: project,
+            input: JSON.stringify({ hook_event_name: "Stop", cwd: project }),
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            env: { ...baseEnv, ...scenario.overrides },
+          });
+
+          assert.equal(result.status, 0, `${scenario.name}: ${result.stderr || result.stdout}`);
+          assert.equal(result.stderr, "", scenario.name);
+          assert.equal(
+            parseSingleJsonStdout(result.stdout).stopReason,
+            "native_stop_dispatch_failure",
+            scenario.name,
+          );
+          const selectedRoot = scenario.expectedRoot ?? project;
+          const selectedLogsDir = join(selectedRoot, ".omx", "logs");
+          const logFiles = await readdir(selectedLogsDir);
+          assert.equal(
+            logFiles.some((name) => /^native-hook-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)),
+            true,
+            scenario.name,
+          );
+          if (scenario.expectedRoot) {
+            assert.equal(existsSync(join(project, ".omx", "logs")), false, scenario.name);
+          }
+          if (scenario.unusedRoot) {
+            assert.equal(existsSync(join(scenario.unusedRoot, ".omx", "logs")), false, scenario.name);
+          }
+        } finally {
+          await rm(project, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(unusedStateRoot, { recursive: true, force: true });
+      await rm(omxRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps CLI failure handling non-fatal when the selected native-hook log root is unwritable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "omx-native-hook-unwritable-project-"));
+    const runtimeParent = await mkdtemp(join(tmpdir(), "omx-native-hook-unwritable-runtime-"));
+    const runtimeRoot = join(runtimeParent, "runtime-root");
+    try {
+      await writeFile(runtimeRoot, "not a directory\n");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        OMX_ROOT: runtimeRoot,
+        NODE_ENV: "test",
+        OMX_NATIVE_HOOK_TEST_THROW_DISPATCH: "1",
+      };
+      delete env.OMX_STATE_ROOT;
+      delete env.OMX_TEAM_STATE_ROOT;
+      delete env.OMX_TEAM_ROOT;
+      delete env.OMX_PLUGIN_ROOT;
+      delete env.OMX_PLUGIN_CACHE_PIN_PENDING;
+      delete env.OMX_PLUGIN_CACHE_PIN_REQUIRED;
+
+      const result = spawnSync(process.execPath, [nativeHookScriptPath()], {
+        cwd: project,
+        input: JSON.stringify({ hook_event_name: "Stop", cwd: project }),
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+      });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stderr, "");
+      assert.equal(parseSingleJsonStdout(result.stdout).stopReason, "native_stop_dispatch_failure");
+      assert.equal(existsSync(join(project, ".omx")), false);
+      assert.equal(await readFile(runtimeRoot, "utf-8"), "not a directory\n");
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(runtimeParent, { recursive: true, force: true });
     }
   });
 
