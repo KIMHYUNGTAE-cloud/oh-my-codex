@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import { describe, it, type TestContext } from 'node:test';
 import { buildPtyScriptCommand, isRealTmuxAvailable, runPtyResult, tmuxSessionExists, withTempTmuxSession } from './tmux-test-fixture.js';
 
-function skipUnlessTmux(t: TestContext): void {
+function skipUnlessTmux(t: TestContext): boolean {
   if (!isRealTmuxAvailable()) {
     t.skip('tmux is not available in this environment');
+    return true;
   }
+  return false;
 }
 
 function runAmbientTmux(args: string[]): string {
@@ -39,7 +41,7 @@ function uniqueAmbientSessionName(): string {
 
 describe('withTempTmuxSession', () => {
   it('provides isolated tmux env and cleans up on success', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     const ambientTmux = process.env.TMUX;
     const ambientTmuxPane = process.env.TMUX_PANE;
     let sessionName = '';
@@ -81,7 +83,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('cleans up when the callback throws', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     let sessionName = '';
     let serverName = '';
 
@@ -98,7 +100,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('keeps ambient default-server sessions untouched by default', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     const ambientSessionName = uniqueAmbientSessionName();
     const created = runAmbientTmux([
       'new-session',
@@ -128,7 +130,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('only uses the ambient server when a test explicitly opts in', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     let sessionName = '';
 
     await withTempTmuxSession({ useAmbientServer: true }, async (fixture) => {
@@ -143,7 +145,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('rejects private server logging on the ambient server', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     await assert.rejects(
       withTempTmuxSession({ useAmbientServer: true, serverLog: true }, async () => undefined),
       /server logging requires a private synthetic tmux server/,
@@ -151,7 +153,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('exposes a private server log only when logging is enabled', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     await withTempTmuxSession(async (fixture) => {
       assert.equal(fixture.serverLogPath, null);
       await assert.rejects(fixture.readServerLog(), /server logging was not enabled/);
@@ -164,7 +166,7 @@ describe('withTempTmuxSession', () => {
   });
 
   it('rejects out-of-range client resize geometry before attaching', async (t) => {
-    skipUnlessTmux(t);
+    if (skipUnlessTmux(t)) return;
     await withTempTmuxSession(async (fixture) => {
       assert.throws(() => fixture.triggerClientResize(fixture.sessionName, { rows: 3 }), /invalid trigger rows: 3/);
       assert.throws(() => fixture.triggerClientResize(fixture.sessionName, { rows: 501 }), /invalid trigger rows: 501/);

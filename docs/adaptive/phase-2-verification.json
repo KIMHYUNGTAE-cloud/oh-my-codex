@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "phase": 2,
+  "status": "verified-local-fork",
+  "verifiedAt": "2026-10-26T06:33:07.700677+00:00",
+  "branch": "adaptive/project-evolution",
+  "baseCommit": "fe09b80e76e85105c10840730bdca5397247a9e4",
+  "requirements": [
+    {
+      "requirement": "Create a task-scoped role only for uncovered capabilities; reuse project/upstream roles first",
+      "evidence": [
+        "src/evolution/__tests__/planner.test.ts",
+        ".local-tests/team-smoke-e78206e5/plan.json"
+      ],
+      "result": "passed"
+    },
+    {
+      "requirement": "Persistent role creation/edit/retirement through evaluated multi-file apply/recovery/rollback",
+      "evidence": [
+        "src/evolution/__tests__/roles.test.ts",
+        ".local-tests/phase-2-final-tests.log"
+      ],
+      "result": "passed; includes actual SIGKILL and user-edit conflicts"
+    },
+    {
+      "requirement": "Generated native agent is accepted by the real Codex loader",
+      "evidence": [
+        ".local-tests/native-role-load/prompt.json",
+        ".local-tests/native-role-load/stderr.log"
+      ],
+      "result": "actual codex debug prompt-input exited 0 and contains adaptive-native-fixture"
+    },
+    {
+      "requirement": "Host-supported exact model/effort allocation and immutable per-run settings",
+      "evidence": [
+        "src/evolution/__tests__/host.test.ts",
+        "src/evolution/__tests__/planner.test.ts",
+        ".local-tests/team-smoke-e78206e5/host.json",
+        ".local-tests/team-smoke-e78206e5/report.json"
+      ],
+      "result": "passed; observed gpt-6-luna/high and gpt-6-astra/medium"
+    },
+    {
+      "requirement": "Token-aware direct/specialist/team routing, consolidation, ownership/dependency guards and bounded staffing",
+      "evidence": [
+        "src/evolution/__tests__/planner.test.ts",
+        ".local-tests/team-smoke-e78206e5/automatic-plan.json",
+        ".local-tests/team-smoke-e78206e5/scale-cap.json"
+      ],
+      "result": "passed; actual tiny-task evidence favors the automatic direct route"
+    },
+    {
+      "requirement": "Reuse OMX runtime; disable nested delegation; preserve actual dependency IDs; no hidden retries",
+      "evidence": [
+        "src/team/adaptive-contract.ts",
+        "src/team/runtime.ts",
+        "src/team/scaling.ts",
+        ".local-tests/team-smoke-e78206e5/report.json",
+        ".local-tests/team-smoke-e78206e5/shutdown.log"
+      ],
+      "result": "passed; both tasks completed, two worker model sessions, absolute fork CLI invocations and normal shutdown"
+    },
+    {
+      "requirement": "Actual observations feed subsequent plans while unknown usage stays unknown",
+      "evidence": [
+        "src/evolution/__tests__/planner.test.ts",
+        ".local-tests/team-smoke-e78206e5/feedback-report.json"
+      ],
+      "result": "passed; two verified model/effort-matched calibration entries; leader usage remains unknown"
+    },
+    {
+      "requirement": "Keep installed OMX and shared configuration/auth isolated",
+      "evidence": [
+        ".local-tests/phase-2-isolation.json",
+        ".local-tests/phase-2-credential-check.json"
+      ],
+      "result": "passed; no phase-2 shared-file changes, no credentials or worker processes remain"
+    }
+  ],
+  "checks": {
+    "build": "passed",
+    "noUnused": "passed",
+    "lint": "passed; 903 source files",
+    "pluginBundle": "passed; 24 canonical skills",
+    "gitDiffCheck": "passed",
+    "tests": {
+      "tests": 1332,
+      "suites": 120,
+      "pass": 1332,
+      "fail": 0,
+      "skipped": 0
+    },
+    "testLog": ".local-tests/phase-2-final-tests.log",
+    "testDurationMs": 254015.505625
+  },
+  "actualPilot": {
+    "path": ".local-tests/team-smoke-e78206e5/report.json",
+    "modelSessions": 3,
+    "requestedParentSelection": "user default snapshotted once; medium fixed for the pilot",
+    "workers": [
+      {
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "usage": {
+          "input_tokens": 198600,
+          "cached_input_tokens": 148224,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1874,
+          "reasoning_output_tokens": 576,
+          "total_tokens": 200474
+        }
+      },
+      {
+        "model": "gpt-6-astra",
+        "effort": "medium",
+        "usage": {
+          "input_tokens": 151519,
+          "cached_input_tokens": 137600,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1299,
+          "reasoning_output_tokens": 19,
+          "total_tokens": 152818
+        }
+      }
+    ],
+    "automaticRouting": "direct",
+    "baselineTotalTokens": 42003,
+    "workerTokensBeforeShutdown": 353292,
+    "teamLeaderModelTokens": "not-measured",
+    "generalSavings": "not-established",
+    "normalShutdownPassed": true
+  },
+  "diagnostics": [
+    {
+      "path": ".local-tests/team-smoke-1de28eb2/report.json",
+      "acceptedForEndToEndIsolation": false,
+      "reason": "Observed models/tasks, but worker CLI provenance was not established and usage sampled before full turn settlement"
+    },
+    {
+      "path": ".local-tests/team-smoke-45d293f6/report.json",
+      "status": "failed",
+      "reason": "Login-shell PATH selected global omx; fixed by absolute fork CLI binding and explicit independent-task coordination"
+    }
+  ],
+  "isolation": {
+    "baselinePaths": 7725,
+    "unchanged": 7724,
+    "changedPaths": [
+      "/Users/kimhyungtae/.codex/config.toml"
+    ],
+    "phase2SharedChangedPaths": [],
+    "installedOmxUnchanged": true,
+    "globalConfigChangePredatesPhase2": true
+  },
+  "credentials": {
+    "fieldsChecked": [
+      "access_token",
+      "id_token",
+      "refresh_token"
+    ],
+    "filesScanned": 2089,
+    "credentialValueMatches": [],
+    "temporaryAuthFilesRemaining": [],
+    "accountIdentifierIsMetadataNotCredential": true
+  },
+  "limits": [
+    "Model quality tiers and task difficulty are explicit project/current-agent judgments, not a learned semantic quality guarantee.",
+    "Token budget is an admission estimate, not a server-side hard spending cap.",
+    "Pilot token totals include cached inputs and do not establish monetary savings or general causality.",
+    "Native role files require recovery before a new session after an interrupted multi-file transaction.",
+    "Codex team launch retains the existing tmux requirement; no global tmux installation was made.",
+    "Executable skill evolution, upstream refresh/merge preservation, and matched longitudinal model-quality optimization remain later roadmap phases.",
+    "Changes remain local and uncommitted; no global installation, npm link, push, or publication."
+  ],
+  "sourceSha256": {
+    "bin/omx-adaptive.mjs": "931cf3a5cb37730a4ac10eaffeada342471ce90df61c45b63fe9367808d309e9",
+    "scripts/adaptive-team-smoke.py": "0ced2e9348d1782a4d00d85e93054f730874f48d993e5a1ba3295318e7a7433e",
+    "src/cli/evolve.ts": "810e3853eccb13fefe8d0ee5b3153345a23f15dfd22a86d209f26c1fd3796544",
+    "src/cli/index.ts": "8e68e424811dc950cf2ee6674c60239481e82a21446c8e1b032bbe75a6c33461",
+    "src/evolution/__tests__/host.test.ts": "a5d9bf8f4d435a7a39c8935beb9d6a188678e3799fbd269a5cf6521ae12b4c94",
+    "src/evolution/__tests__/planner.test.ts": "8ac17f540a8b371512fe360328bfe9bd3cd85a006fb2c782ee0d117a7af7528b",
+    "src/evolution/__tests__/roles.test.ts": "7e08657bb396261609b194c1fbcc413a125bbafedddfb883df81d76cbebb5763",
+    "src/evolution/__tests__/service.test.ts": "e3601fcd1543e8aa7323540f5c4a93ce8aadfeb31a5cf4e2a838a037057cc45d",
+    "src/evolution/calibration.ts": "8993b94d0ce92a56f6c21cb4f277af76ab0062134b9c1c1fdb3ac5cac8eda0bd",
+    "src/evolution/check-runner.ts": "9d8c6a1d90def850a8fc9a20bf4f7de9e04a445ccc3de9a316ffe94e686f03dc",
+    "src/evolution/execution.ts": "df7f15713a1dacba425bf55f62168f1452bc581e8f408f649a897d51313a0faa",
+    "src/evolution/host.ts": "c850d954a8d5fce3b01c425efcaf9f4382b587c8e6f6b96a66372593e9064931",
+    "src/evolution/planner.ts": "a6980a94a81b0234471c89896ef73ce46ec9367dd659cc54bd86682b7bc53418",
+    "src/evolution/roles.ts": "4effa8a378ffa10f7b5b876e712afee81fb0e37644b103e6f4670d2a405b1213",
+    "src/evolution/service.ts": "88e5bd9d1f16f8a7eac49a8a67d4cd6d52908c6f0708b59ec6cf446de61ffe2e",
+    "src/scripts/codex-native-hook.ts": "af0352cb0bda9d5578c99b478ec3d281abfdadd8aa4e956323c9e1fa5f2f41e3",
+    "src/team/adaptive-contract.ts": "f3b86d8a922974bc65896c0b456ddc91af228805e6f8618adce8e0c69e283f29",
+    "src/team/runtime.ts": "bad5b8f5e3822bbe2e31d54f7b55556da0737ad7e5fe2b46ecab7dad7171ee06",
+    "src/team/scaling.ts": "96a3f6201eb341ffcc3aaeacdcee5751104071e06809053c718b0ca8c55cfaeb"
+  }
+}

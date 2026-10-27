@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "phase": 3,
+  "status": "verified-local-fork-scoped",
+  "verifiedAt": "2026-10-27T02:08:26.209919+00:00",
+  "branch": "adaptive/project-evolution",
+  "baseCommit": "fe09b80e76e85105c10840730bdca5397247a9e4",
+  "requirements": [
+    {
+      "name": "Find and inspect skills.sh candidates without project or global installation",
+      "evidence": [
+        ".local-tests/phase-3-find.json",
+        ".local-tests/phase-3-inspect.json",
+        "src/evolution/__tests__/skill-discovery.test.ts"
+      ],
+      "result": "passed; 20 parsed search candidates and one first-party inspected source; CLI staged in deleted temporary project"
+    },
+    {
+      "name": "An actual inspected skills.sh source compiles as a project-owned sourced skill without installation",
+      "evidence": [
+        ".local-tests/phase-3-sourced-compile.json",
+        ".local-tests/phase-3-inspect.json"
+      ],
+      "result": "passed; first-party find-skills source compiled to deterministic project source and SKILL.md hashes in memory"
+    },
+    {
+      "name": "Deterministic project skill source and native asset compilation with provenance, digest, dependency, activation and reference validation",
+      "evidence": [
+        "src/evolution/__tests__/skills.test.ts",
+        ".local-tests/phase-3-evolution-tests.log"
+      ],
+      "result": "passed; bounded supporting scripts compile without execution"
+    },
+    {
+      "name": "Incident-backed skill evaluation, explicit apply, recovery, rollback, conflict and role-dependency protection",
+      "evidence": [
+        "src/evolution/__tests__/skill-evolution.test.ts",
+        "src/evolution/__tests__/roles.test.ts",
+        ".local-tests/phase-3-evolution-tests.log"
+      ],
+      "result": "passed; automatic skill apply disabled by default"
+    },
+    {
+      "name": "Roles and staffing plans bind only applied project skills and reject drift",
+      "evidence": [
+        "src/evolution/__tests__/planner.test.ts",
+        "src/evolution/__tests__/roles.test.ts"
+      ],
+      "result": "passed; generated skill hashes pinned before dispatch"
+    },
+    {
+      "name": "Real Codex discovers and executes generated skill on an independent case",
+      "evidence": [
+        ".local-tests/skill-smoke-20261026T073006Z/report.json",
+        ".local-tests/skill-smoke-20261026T073006Z/prompt.json",
+        ".local-tests/skill-smoke-20261026T073006Z/events.jsonl"
+      ],
+      "result": "passed; gpt-6-luna/low invoked project skill script and returned schema-ok:7; authoring evaluation used value 11"
+    },
+    {
+      "name": "Installed OMX and user auth remain isolated",
+      "evidence": [
+        ".local-tests/skill-smoke-20261026T073006Z/report.json",
+        ".local-tests/isolation-before.json"
+      ],
+      "result": "passed for original auth hash and installed OMX entry/package; no credential literals in scanned pilot artifacts"
+    }
+  ],
+  "checks": {
+    "build": "passed",
+    "noUnused": "passed",
+    "lint": "passed; 908 files",
+    "pluginBundle": "passed; 24 skills",
+    "gitDiffCheck": "passed",
+    "evolution": {
+      "tests": 78,
+      "failures": 0,
+      "log": ".local-tests/phase-3-evolution-tests.log"
+    },
+    "teamFocused": {
+      "tests": 236,
+      "failures": 0,
+      "log": ".local-tests/phase-3-team-focused-tests.log"
+    },
+    "fullSuite": {
+      "command": "npm test",
+      "environment": "detached process; TMPDIR=/private/tmp; caffeinate -dimsu; temporary absence of untracked local AGENTS.md, restored unchanged after run",
+      "testFiles": 476,
+      "tests": 9065,
+      "passed": 8983,
+      "failed": 0,
+      "skipped": 82,
+      "exitCode": 0,
+      "log": ".local-tests/full-suite-awake-final.log"
+    }
+  },
+  "actualPilot": {
+    "report": ".local-tests/skill-smoke-20261026T073006Z/report.json",
+    "status": "passed",
+    "evaluation": "ready",
+    "application": "applied",
+    "nativeLoader": true,
+    "independentCase": "value 7; authoring check value 11",
+    "observedModels": [
+      "gpt-6-luna"
+    ],
+    "observedEfforts": [
+      "low"
+    ],
+    "scriptInvoked": true,
+    "exactMarker": "schema-ok:7",
+    "originalAuthUnchanged": true,
+    "temporaryHomeRemoved": true
+  },
+  "discovery": {
+    "searchCandidates": 20,
+    "inspectedId": "vercel-labs/skills/find-skills",
+    "inspectedFileCount": 1,
+    "inspectedContentSha256": "b146008599c31057cef1c145774cea5d5afb30e8f43fa802e47a4b461419aaaf",
+    "publicApiWithoutVercelOidc": "401 authentication_required; CLI fallback verified"
+  },
+  "isolation": {
+    "installedBaselineMatches": {
+      "/opt/homebrew/bin/omx": true,
+      "/opt/homebrew/lib/node_modules/oh-my-codex/package.json": true
+    },
+    "credentialArtifactsScanned": 26,
+    "credentialLiteralMatches": [],
+    "temporarySkillDirectoriesRemaining": 0
+  },
+  "diagnostics": [
+    {
+      "path": ".local-tests/skill-smoke-20261026T071214Z/report.json",
+      "reason": "First real run exposed ambiguous skill-relative script path; compiler now states project-root prefix."
+    },
+    {
+      "path": ".local-tests/skill-smoke-20261026T071246Z/report.json",
+      "reason": "Model succeeded but pilot scanner omitted Codex exec item.completed command events; scanner corrected."
+    },
+    {
+      "path": ".local-tests/phase-3-final-tests.log",
+      "reason": "Optional 476-file run was interrupted after fixture failures. Reproduction isolated two environment causes: macOS /var versus /private/var aliases, and a hook test that assumes no Codex ancestor while this workspace runs under Codex. The three representative path failures passed with TMPDIR=/private/tmp; the hook file passed as a detached process with that canonical TMPDIR (37 pass, 4 skip). This is not a full-suite green claim."
+    },
+    {
+      "path": ".local-tests/phase-3-integration-tests.log",
+      "reason": "Optional broad native-hook test had a long input wait and was stopped; focused Phase 3 and team tests completed separately."
+    },
+    {
+      "path": ".local-tests/phase-3-hook-canonical-detached.log",
+      "reason": "Whole issue-3790 hook test file under canonical TMPDIR and detached process ancestry: 37 passed, 0 failed, 4 skipped."
+    },
+    {
+      "path": ".local-tests/full-suite-awake-final.log",
+      "reason": "Final full npm test passed: 476 files, 8983 passed, 0 failed, 82 skipped. Build, runtime build, native-agent/plugin/capabilities/prompt checks, catalog and prompt inventory checks all passed. Earlier long-running attempts overlapped macOS system sleep; final run used caffeinate."
+    }
+  ],
+  "limits": [
+    "No automatic remote skill installation, trust, or update.",
+    "CLI discovery uses pinned external npm package in disposable HOME on explicit request; requires network/npm.",
+    "Skills.sh API needs Vercel OIDC; without it the adapter provides a search-page fallback.",
+    "Project skill evaluation runs configured checks in isolated copies with scrubbed environment, not an OS sandbox.",
+    "The independent live case proves fixture behavior, not general skill quality or token savings.",
+    "Generated skill hashes are checked at plan creation and before dispatch; concurrent manual edits during execution are outside this phase.",
+    "No remote GitHub fork, push, global OMX install or shared Codex setting change is part of this phase."
+  ],
+  "sourceSha256": {
+    "src/evolution/skills.ts": "cb33b3a0e2dc7655a0609b0628f760ff6eedb59d8a78d85fea1e5d92d8a7079b",
+    "src/evolution/skill-discovery.ts": "16d43b20149977aaede610c04be5742050f6c7aa2d56e0a2a9d15771b2b62157",
+    "src/evolution/service.ts": "80f2e06a4e2e497651e8e4c8095af7a387c008cdb9d9376ce28df42b3f1be747",
+    "src/evolution/roles.ts": "58e50f787842769888f0b8b631bbe1b74744a5e95c7ed668094a312564e6c481",
+    "src/evolution/planner.ts": "9e65003dc32f7624062b9780ea6fc40e77a4f7425068af8e047043316c0d6946",
+    "src/cli/evolve.ts": "b8af4a5c821087daaa63b86d70b6cc9b2274553a73ceceaa1009b44b43eab677",
+    "scripts/adaptive-skill-smoke.py": "72758afef717815cdde15651a950ea5af3bbbcc78e719454df455938b8b2173e"
+  }
+}

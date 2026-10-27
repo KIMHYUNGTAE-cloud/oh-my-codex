@@ -3,6 +3,7 @@ import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync,
 import { appendFile, lstat, mkdir, open, readFile, readdir, realpath, stat, unlink, writeFile } from "fs/promises";
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { createHash } from "crypto";
+import { safeEvolutionContext, evolutionWorkflow } from '../evolution/service.js';
 
 import { fileURLToPath, pathToFileURL } from "url";
 import { promisify } from "util";
@@ -2469,6 +2470,9 @@ async function buildSessionStartContext(
   if (wikiContext.additionalContext) {
     sections.push(wikiContext.additionalContext);
   }
+  const projectEvolutionContext = safeEvolutionContext(cwd);
+  if (projectEvolutionContext) sections.push(projectEvolutionContext);
+  try { const workflow = evolutionWorkflow(cwd); if (workflow) sections.push(workflow); } catch { /* surfaced by safeEvolutionContext */ }
 
   const subagentSummary = await readSubagentSessionSummary(cwd, sessionId).catch(() => null);
   if (subagentSummary && subagentSummary.activeSubagentThreadIds.length > 0) {
@@ -22792,6 +22796,7 @@ export async function dispatchCodexNativeHook(
           ultragoalSteeringAdditionalContext,
           goalWorkflowAdditionalContext,
           triageAdditionalContext,
+          safeEvolutionContext(cwd, typeof payload.prompt === 'string' ? payload.prompt : ''),
         ].filter((entry): entry is string => Boolean(entry)).join("\n\n") || null;
     // Record bounded delivery evidence for native subagent SessionStart events
     // Skip if recordNativeSubagentSessionStart already recorded the turn (to avoid duplicate increment)

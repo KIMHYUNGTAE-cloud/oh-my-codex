@@ -465,6 +465,7 @@ type CliCommand =
   | "version"
   | "tmux-hook"
   | "hooks"
+  | "evolve"
   | "hud"
   | "sidecar"
   | "state"
@@ -5094,6 +5095,7 @@ export async function main(args: string[]): Promise<void> {
     "version",
     "tmux-hook",
     "hooks",
+    "evolve",
     "hud",
     "sidecar",
     "state",
@@ -5313,6 +5315,11 @@ if (command !== "launch" && command !== "resume") {
       case "hooks":
         await hooksCommand(args.slice(1));
         break;
+      case "evolve": {
+        const { evolveCommand } = await import('./evolve.js');
+        await evolveCommand(args.slice(1));
+        break;
+      }
       case "status":
         await showStatus();
         break;
@@ -9383,6 +9390,11 @@ export async function postLaunch(
   if (closeEvidence.status === "failed") {
     throw new Error(`bound session retained close failed: ${closeEvidence.error?.message ?? "unknown error"}`);
   }
+  // Adaptive fork: only already-evaluated proposals after successful bound cleanup.
+  try {
+    const { settleEvolution } = await import('../evolution/service.js');
+    settleEvolution(cwd, !process.exitCode);
+  } catch (error) { logCliOperationFailure(error); }
 }
 
 export async function runDetachedSessionPostLaunch(

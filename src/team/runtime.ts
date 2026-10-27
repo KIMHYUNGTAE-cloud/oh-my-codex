@@ -138,6 +138,7 @@ import { buildTeamWorkerGoalInstruction } from './goal-workflow.js';
 import { synthesizeDelegationPlan } from './delegation-policy.js';
 import { coordinationPlansEqual, synthesizeCoordinationPlan, synthesizeCoordinationPlans } from './coordination-protocol.js';
 import { loadRolePrompt } from './role-router.js';
+import { adaptiveCliBinding, adaptiveTaskIdMap, bindAdaptiveCli, pinAdaptiveLaunchArgs, validateAdaptiveWorkers, type AdaptiveWorkerLaunchSpec } from './adaptive-contract.js';
 import { composeRoleInstructionsForRole } from '../agents/native-config.js';
 import { codexPromptsDir } from '../utils/paths.js';
 import { isTerminalPhase, type TeamPhase, type TerminalPhase } from './orchestrator.js';
@@ -1949,6 +1950,8 @@ export interface StaleTeamSummary {
 }
 
 export interface TeamStartOptions {
+  /** Frozen adaptive decisions; all process/task lifecycle remains in this runtime. */
+  adaptiveWorkers?: readonly AdaptiveWorkerLaunchSpec[];
   codexHomeOverride?: string;
   worktreeMode?: WorktreeMode;
   decompositionMetadata?: TeamDecompositionMetadata;
@@ -3383,6 +3386,7 @@ export function resolveWorkerLaunchArgsFromEnv(
   inheritedLeaderModel?: string,
   preferredReasoning?: TeamReasoningEffort,
   workerCliOverride?: TeamWorkerCli,
+  quiet = false,
 ): string[] {
   const inheritedFromEnv = typeof env[TEAM_WORKER_INHERITED_MODEL_ENV] === 'string'
     ? env[TEAM_WORKER_INHERITED_MODEL_ENV]?.trim()
@@ -3404,6 +3408,7 @@ export function resolveWorkerLaunchArgsFromEnv(
   });
 
   const resolved = diagnostics.actualLaunchArgs;
+  if (quiet) return resolved;
   const resolvedModel = diagnostics.actualModel ?? diagnostics.requestedDefaultModel ?? 'default';
   const thinkingLevel = diagnostics.actualReasoning ?? 'none';
   const source = diagnostics.reasoningSource === 'none'
@@ -3464,12 +3469,13 @@ interface WorkerLaunchPolicyPlan {
   readonly workerCli: TeamWorkerCli;
 }
 
-function buildWorkerLaunchPolicyPlan(params: {
+export function buildWorkerLaunchPolicyPlan(params: {
   workerCount: number;
   tasks: ReadonlyArray<{ owner?: string; role?: string }>;
   agentType: string;
   launchEnv: NodeJS.ProcessEnv;
   codexHomeOverride?: string;
+  adaptiveWorkers?: readonly AdaptiveWorkerLaunchSpec[];
 }): readonly WorkerLaunchPolicyPlan[] {
   const plans: WorkerLaunchPolicyPlan[] = [];
 
@@ -3480,23 +3486,29 @@ function buildWorkerLaunchPolicyPlan(params: {
       .map((task) => task.role)
       .filter((role): role is string => Boolean(role));
     const uniqueTaskRoles = [...new Set(taskRoles)];
-    const workerRole = taskRoles.length > 0 && uniqueTaskRoles.length === 1
+    const adaptive = params.adaptiveWorkers?.[workerIndex - 1];
+    const workerRole = adaptive?.role ?? (taskRoles.length > 0 && uniqueTaskRoles.length === 1
       ? taskRoles[0]!
-      : params.agentType;
+      : params.agentType);
     const preferredReasoning = resolveAgentReasoningEffort(workerRole, params.codexHomeOverride)
       ?? resolveAgentReasoningEffort(params.agentType, params.codexHomeOverride);
-    const workerLaunchArgs = resolveWorkerLaunchArgsFromEnv(
+    const inheritedLaunchArgs = resolveWorkerLaunchArgsFromEnv(
       params.launchEnv,
       workerRole,
       undefined,
       preferredReasoning,
+      undefined,
+      Boolean(adaptive),
     );
+    const workerLaunchArgs = adaptive ? pinAdaptiveLaunchArgs(inheritedLaunchArgs, adaptive) : inheritedLaunchArgs;
+    if (adaptive) console.log(`[omx:team] adaptive requested_role=${adaptive.role} requested_model=${adaptive.model} requested_effort=${adaptive.effort} source=frozen-plan observed_model=unknown`);
     const workerCli = resolveTeamWorkerCliForResolvedLaunchArgs(
       workerIndex,
       params.workerCount,
       workerLaunchArgs,
       params.launchEnv,
     );
+    if (adaptive && workerCli !== 'codex') throw new Error('Adaptive model catalog is Codex-only; worker CLI must be codex');
 
     plans.push(Object.freeze({
       workerName,
@@ -3566,6 +3578,7 @@ export async function startTeam(
   options: TeamStartOptions = {},
 ): Promise<TeamRuntime> {
   const leaderCwd = resolve(cwd);
+  const adaptiveWorkers = options.adaptiveWorkers ? validateAdaptiveWorkers(options.adaptiveWorkers, workerCount) : undefined;
   const codexHomeOverride = typeof options.codexHomeOverride === 'string' && options.codexHomeOverride.trim() !== ''
     ? options.codexHomeOverride.trim()
     : (typeof process.env.CODEX_HOME === 'string' && process.env.CODEX_HOME.trim() !== ''
@@ -3671,6 +3684,7 @@ export async function startTeam(
     agentType,
     launchEnv,
     codexHomeOverride,
+    adaptiveWorkers,
   });
   for (const workerLaunchPolicy of workerLaunchPolicyPlan) {
     assertTeamWorkerCliPolicyCompatibility(
@@ -3722,7 +3736,7 @@ export async function startTeam(
 
   // 2. Team name is already sanitized above.
   let sessionName = `omx-team-${sanitized}`;
-  const overlay = generateWorkerOverlay(sanitized);
+  const overlay = adaptiveWorkers ? bindAdaptiveCli(generateWorkerOverlay(sanitized)) : generateWorkerOverlay(sanitized);
   let workerInstructionsPath: string | null = null;
   let sessionCreated = false;
   const createdWorkerPaneIds: string[] = [];
@@ -3757,7 +3771,7 @@ export async function startTeam(
       agentType,
       workerCount,
       leaderCwd,
-      DEFAULT_MAX_WORKERS,
+      adaptiveWorkers ? workerCount : DEFAULT_MAX_WORKERS,
       {
         ...launchEnv,
         OMX_SESSION_ID: leaderSessionId,
@@ -3778,6 +3792,7 @@ export async function startTeam(
     if (!config) {
       throw new Error('failed to initialize team config');
     }
+    if (adaptiveWorkers) await writeAtomic(join(teamStateRoot, 'team', sanitized, 'adaptive-contract.json'), JSON.stringify({ schemaVersion: 1, workers: adaptiveWorkers }, null, 2));
     config.leader_cwd = leaderCwd;
     config.team_state_root = teamStateRoot;
     config.workspace_mode = workspaceMode;
@@ -3832,7 +3847,7 @@ export async function startTeam(
     const effectiveDecompositionMetadata = options.decompositionMetadata
       ? remapRepoAwareDecompositionMetadataToCreatedTasks(options.decompositionMetadata, tasks, createdTasks)
       : undefined;
-    const nodeIdToTaskId = effectiveDecompositionMetadata?.node_id_to_task_id ?? {};
+    const nodeIdToTaskId = effectiveDecompositionMetadata?.node_id_to_task_id ?? (adaptiveWorkers ? adaptiveTaskIdMap(tasks, createdTasks) : {});
     for (let index = 0; index < tasks.length; index += 1) {
       const planned = tasks[index];
       if (!planned?.symbolic_id) continue;
@@ -3891,12 +3906,13 @@ export async function startTeam(
       const workerWorkspace = workerWorkspaceByName.get(workerName) ?? { cwd: leaderCwd };
       const workerTasks = allTasks.filter(t => t.owner === workerName);
       const runtimeRole = workerLaunchPolicy.workerRole;
-      const rawRolePromptContent = await loadRolePrompt(runtimeRole, join(leaderCwd, '.codex', 'prompts'))
-        ?? await loadRolePrompt(runtimeRole, codexPromptsDir());
+      const adaptive = adaptiveWorkers?.[i - 1];
+      const rawRolePromptContent = adaptive?.instructions ?? (await loadRolePrompt(runtimeRole, join(leaderCwd, '.codex', 'prompts'))
+        ?? await loadRolePrompt(runtimeRole, codexPromptsDir()));
       const workerLaunchArgs = workerLaunchPolicy.workerLaunchArgs;
       const workerCli = workerLaunchPolicy.workerCli;
       const resolvedWorkerModel = parseTeamWorkerLaunchArgs([...workerLaunchArgs]).modelOverride ?? undefined;
-      const rolePromptContent = rawRolePromptContent
+      const rolePromptContent = adaptive ? `${adaptiveCliBinding}\n\n${adaptive.instructions}` : rawRolePromptContent
         ? composeRoleInstructionsForRole(runtimeRole, rawRolePromptContent, resolvedWorkerModel)
         : null;
       const workerWorktreePath = workerWorkspace.worktreePath ?? undefined;
@@ -3922,11 +3938,11 @@ export async function startTeam(
         : rolePromptContent
           ? await writeWorkerRoleInstructionsFile(sanitized, workerName, leaderCwd, fallbackInstructionsPath, runtimeRole, rolePromptContent)
           : fallbackInstructionsPath;
-      const inbox = generateInitialInbox(workerName, sanitized, agentType, workerTasks, {
+      const rawInbox = generateInitialInbox(workerName, sanitized, agentType, workerTasks, {
         teamStateRoot,
         leaderCwd,
         workerRole: runtimeRole,
-        rolePromptContent: rawRolePromptContent ?? undefined,
+        rolePromptContent: adaptive ? undefined : rawRolePromptContent ?? undefined,
         worktreeRootAgentsCanonical: Boolean(workerWorkspace.worktreePath),
         taskHints: effectiveDecompositionMetadata?.task_hints,
         approvedContextSection,
@@ -3935,6 +3951,7 @@ export async function startTeam(
           : effectiveDecompositionMetadata?.approved_context_summary,
         workerGoalInstruction: buildTeamWorkerGoalInstruction(sanitized, workerName, workerTasks, { teamStateRoot }),
       });
+      const inbox = adaptive ? bindAdaptiveCli(rawInbox) : rawInbox;
       const triggerDirective = buildTriggerDirective(
         workerName,
         sanitized,
@@ -7231,6 +7248,20 @@ async function sendLeaderMailboxMessage(params: {
       return await notifyLeaderAsync(config, message, cwd);
     },
   });
+
+  if (
+    queuedOutcome.reason === 'duplicate_pending_dispatch_request'
+    && queuedOutcome.message_id
+    && transportPreference === 'hook_preferred_with_fallback'
+    && !isTmuxAvailable()
+  ) {
+    return {
+      ...queuedOutcome,
+      ok: true,
+      transport: 'mailbox',
+      reason: 'existing_message_pending_dispatch',
+    };
+  }
 
   if (
     !isExistingMailboxNotificationOutcome(queuedOutcome)

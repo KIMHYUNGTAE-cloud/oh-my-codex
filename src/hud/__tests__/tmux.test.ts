@@ -322,7 +322,10 @@ describe('HUD resize hook helpers', () => {
     try {
       mkdirSync(binDir);
       writeFileSync(join(binDir, 'sleep'), '#!/bin/sh\nprintf "%s\\n" "$$" >> "$OMX_TEST_SLEEP_PIDS"\nexec /bin/sleep "$@"\n', { mode: 0o755 });
-      const command = buildPosixHudReconcileSupervisorCommand('/bin/sleep 0.1', 10_000);
+      const command = buildPosixHudReconcileSupervisorCommand(
+        '/bin/sh -c \'while [ ! -s "$OMX_TEST_SLEEP_PIDS" ]; do /bin/sleep 0.01; done; /bin/sleep 0.1\'',
+        10_000,
+      );
       const result = spawnSync('/bin/sh', ['-c', `(${command}) >/dev/null 2>&1 || true`], {
         encoding: 'utf8',
         env: {

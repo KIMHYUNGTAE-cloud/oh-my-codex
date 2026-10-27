@@ -1,0 +1,26 @@
+{
+  "scope": "agent-managed project evolution and model candidates",
+  "date": "2026-10-27",
+  "baseline": {
+    "record": "docs/adaptive/phase-3-verification.json",
+    "fullSuite": "9065 tests, 8983 passed, 82 skipped, zero failed before auto-mode changes"
+  },
+  "current": {
+    "build": "npm run build passed",
+    "typecheck": "npm run check:no-unused passed",
+    "lint": "npm run lint passed: 909 files",
+    "scopedTests": {
+      "log": ".local-tests/auto-scoped-final.log",
+      "completed": 319,
+      "passed": 312,
+      "skipped": 7,
+      "failed": 0,
+      "runStatus": "12 selected test files completed; broad native-hook file was cancelled to narrow scope",
+      "coverage": "evolution, CLI team and launcher, session runtime, HUD tmux, team runtime and scaling"
+    },
+    "hookCases": "SessionStart and UserPromptSubmit targeted cases: 2 passed, zero failed",
+    "launcherRace": "One unrelated full-suite launch fixture assertion observed one transient active-detached record; the same test passed standalone and in the scoped suite",
+    "fullSuite": "Stopped at user request to reduce verification scope; no current full-suite green claim"
+  },
+  "environment": "macOS; TMPDIR=/private/tmp; project AGENTS.md temporarily hidden during repository test run and restored; no user-scope OMX setup"
+}

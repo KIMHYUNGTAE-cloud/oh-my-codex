@@ -604,6 +604,9 @@ export async function scaleUp(
     if (!config) {
       return { ok: false, error: `Team ${sanitized} not found` };
     }
+    if (existsSync(join(resolveCanonicalTeamStateRoot(leaderCwd), 'team', sanitized, 'adaptive-contract.json'))) {
+      return { ok: false, error: 'Adaptive staffing is frozen for this run; observe and shut down this team, then create a new budgeted plan before adding workers' };
+    }
     const originalConfig = JSON.parse(JSON.stringify(config)) as TeamConfig;
     const configPath = join(resolveCanonicalTeamStateRoot(leaderCwd), 'team', sanitized, 'config.json');
     const manifestPath = join(resolveCanonicalTeamStateRoot(leaderCwd), 'team', sanitized, 'manifest.v2.json');

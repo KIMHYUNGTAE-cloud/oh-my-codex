@@ -1,0 +1,94 @@
+{
+  "phase": 1,
+  "status": "complete-with-documented-upstream-test-failures",
+  "upstreamVersion": "0.21.36",
+  "upstreamCommit": "fe09b80e76e85105c10840730bdca5397247a9e4",
+  "focusedTests": {
+    "tests": 517,
+    "passed": 517,
+    "failed": 0,
+    "skipped": 0,
+    "newEvolutionTests": 28,
+    "log": ".local-tests/final-focused-tests-external-temp.log"
+  },
+  "staticChecks": [
+    "npm run build",
+    "npm run check:no-unused",
+    "npm run lint",
+    "npm run verify:plugin-bundle",
+    "git diff --check"
+  ],
+  "upstreamRegressionSubset": {
+    "tests": 771,
+    "passed": 763,
+    "failed": 2,
+    "skipped": 6,
+    "sameTwoFailuresReproducedOnUnmodifiedUpstream": true,
+    "log": ".local-tests/upstream-regressions-with-runtime.log",
+    "baselineLog": ".local-tests/upstream-baseline-comparison.log"
+  },
+  "diagnostics": [
+    "Initial TS-only run lacked the required Rust runtime; built it in isolated Cargo home before rerun.",
+    "Putting temporary test projects below this Git checkout collapsed upstream launch context identities; unmodified upstream reproduced the failure. Final focused run used an external temporary root and passed.",
+    "Initial in-memory auth environment path was unsupported for this cached ChatGPT login; temporary private auth without refresh credentials succeeded and was removed.",
+    "Initial model pilot lacked node on its isolated shell PATH; corrected the test harness PATH and repeated the full pilot."
+  ],
+  "realModelPilot": {
+    "status": "passed",
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "medium",
+    "selection": "snapshot-at-pilot-start",
+    "sessions": 5,
+    "assertions": [
+      "baseline-no-convention",
+      "model-recorded-correction",
+      "evaluation-and-apply",
+      "fresh-session-used-native-hook-guidance-and-executed-tests",
+      "unrelated-task-unaffected",
+      "rollback-removed-convention"
+    ],
+    "report": ".local-tests/model-smoke-89dc0470/report.json",
+    "originalAuthUnchanged": true,
+    "temporaryAuthRemoved": true,
+    "generalQualityImprovement": "not-established"
+  },
+  "isolation": {
+    "checkedPaths": 7725,
+    "unchangedPaths": 7724,
+    "unexpectedChanges": [],
+    "userConfirmedChanges": [
+      {
+        "path": "/Users/kimhyungtae/.codex/config.toml",
+        "fields": [
+          "model_reasoning_effort",
+          "service_tier"
+        ],
+        "confirmedByUser": true
+      }
+    ],
+    "passed": true
+  },
+  "sourceSha256": {
+    "src/evolution/service.ts": "6800802b1657f47993e1bd88f98cb48442c16aa557aa0895d33b75ab4c3fd88e",
+    "src/evolution/check-runner.ts": "9d8c6a1d90def850a8fc9a20bf4f7de9e04a445ccc3de9a316ffe94e686f03dc",
+    "src/evolution/__tests__/service.test.ts": "e3601fcd1543e8aa7323540f5c4a93ce8aadfeb31a5cf4e2a838a037057cc45d",
+    "src/cli/evolve.ts": "44db43d6aebf173821e7761f8d93304d7669cbc474671c8db482c11740db7d61",
+    "src/cli/index.ts": "8e68e424811dc950cf2ee6674c60239481e82a21446c8e1b032bbe75a6c33461",
+    "src/scripts/codex-native-hook.ts": "af0352cb0bda9d5578c99b478ec3d281abfdadd8aa4e956323c9e1fa5f2f41e3",
+    "bin/omx-adaptive.mjs": "931cf3a5cb37730a4ac10eaffeada342471ce90df61c45b63fe9367808d309e9",
+    "scripts/adaptive-model-smoke.py": "fa649d3e714268f1392026efde3cb2a0ab9d938edee12f4b3cbb26f43844378b"
+  },
+  "delivery": {
+    "globalInstallation": false,
+    "existingProjectsModified": false,
+    "remoteRepositoryCreated": false,
+    "localBranch": "adaptive/project-evolution"
+  },
+  "limits": [
+    "Scoped guidance entries only; no executable SKILL.md or role/model allocation changes.",
+    "Automatic settlement is connected only to successful bound OMX launch cleanup; detached settlement remains deferred.",
+    "Agent-reported incident attribution is not authenticated semantic proof.",
+    "Command evaluators are trusted project programs, not an OS sandbox.",
+    "Real-model pilot proves one bounded functional case, not statistical improvement or savings."
+  ]
+}
